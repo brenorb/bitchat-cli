@@ -83,6 +83,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     geo_send = geo_subparsers.add_parser("send", help="Send one public message to a geohash channel")
     geo_send.add_argument("geohash", help="Target geohash, with or without leading #")
+    geo_send.add_argument(
+        "--pow",
+        type=int,
+        default=0,
+        help="Optional NIP-13 proof-of-work difficulty in leading zero bits",
+    )
     geo_send.add_argument("message", help="Message body")
     geo_send.set_defaults(handler=run_geo_send)
 

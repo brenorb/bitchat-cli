@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -50,6 +51,26 @@ def test_create_ephemeral_geohash_event_round_trips_signature() -> None:
     assert geochat.verify_event_signature(event) is True
 
 
+def test_create_ephemeral_geohash_event_can_mine_pow(monkeypatch) -> None:
+    identity = geochat.derive_nostr_identity(bytes.fromhex("77" * 32), "u4pruy")
+    monkeypatch.setattr(geochat.secrets, "randbelow", lambda _limit: 0)
+
+    event = geochat.create_ephemeral_geohash_event(
+        content="hello pow",
+        geohash="u4pruy",
+        identity=identity,
+        nickname="bubbles",
+        created_at=1_719_188_400,
+        pow_difficulty=8,
+    )
+
+    nonce_tags = [tag for tag in event["tags"] if tag[0] == "nonce"]
+    assert len(nonce_tags) == 1
+    assert nonce_tags[0][2] == "8"
+    assert geochat.event_pow_difficulty(str(event["id"])) >= 8
+    assert geochat.verify_event_signature(event) is True
+
+
 def test_identity_derivation_matches_upstream_hmac_shape() -> None:
     seed = bytes.fromhex("33" * 32)
     geohash = "u4pruy"
@@ -87,8 +108,6 @@ def test_geochat_daemon_loads_relays_lazily() -> None:
             await daemon.stop()
         finally:
             geochat.load_relay_entries = original_loader  # type: ignore[assignment]
-
-    import asyncio
 
     asyncio.run(exercise())
 
@@ -143,6 +162,27 @@ def test_geochat_daemon_subscribes_and_publishes_against_local_relay() -> None:
 
         assert published and published[0]["content"] == "outbound hello"
 
-    import asyncio
-
     asyncio.run(exercise())
+
+
+def test_geochat_daemon_deduplicates_same_event_from_multiple_relays() -> None:
+    daemon = geochat.GeoChatDaemon(
+        relay_cache_path=Path("/tmp/georelays.csv"),
+        seed_hex="88" * 32,
+        nickname="local",
+        on_message=lambda event: received.append(event),
+    )
+    received: list[dict[str, object]] = []
+    incoming_identity = geochat.derive_nostr_identity(bytes.fromhex("99" * 32), "u4pruy")
+    event = geochat.create_ephemeral_geohash_event(
+        content="from relay",
+        geohash="u4pruy",
+        identity=incoming_identity,
+        nickname="relay-user",
+    )
+    payload = json.dumps(["EVENT", "geo-u4pruy", event])
+
+    daemon._handle_relay_message("u4pruy", payload)
+    daemon._handle_relay_message("u4pruy", payload)
+
+    assert [item["id"] for item in received] == [event["id"]]

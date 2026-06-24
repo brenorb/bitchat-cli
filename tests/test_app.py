@@ -347,6 +347,31 @@ def test_run_geo_watch_add_persists_normalized_geohash(tmp_path: Path, monkeypat
     assert "u4pruy" in captured.out
 
 
+def test_run_geo_send_passes_pow_difficulty_to_daemon(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    commands: list[dict[str, object]] = []
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+    monkeypatch.setattr(
+        app,
+        "_send_daemon_command",
+        lambda _runtime, payload: commands.append(payload) or {"ok": True, "message_id": "geo-1"},
+    )
+
+    exit_code = app.run_geo_send(argparse.Namespace(geohash="#U4PrUy", message="hello geo", pow=12))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert commands == [
+        {
+            "command": "geo_send",
+            "geohash": "u4pruy",
+            "content": "hello geo",
+            "pow_difficulty": 12,
+        }
+    ]
+    assert "queued geohash message" in captured.out
+
+
 def test_run_geo_watch_list_prints_configured_geohashes(tmp_path: Path, monkeypatch, capsys) -> None:
     runtime = RuntimePaths(tmp_path)
     state_store = app.StateStore(runtime.state_path)

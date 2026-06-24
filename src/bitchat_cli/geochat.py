@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import math
+import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,12 +18,15 @@ from coincurve import PrivateKey, PublicKeyXOnly
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
+from .dedupe import ExpiringSet
+
 _GEOHASH_ALLOWED = set("0123456789bcdefghjkmnpqrstuvwxyz")
 _GEOHASH_BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz"
 _GEOHASH_BASE32_MAP = {char: index for index, char in enumerate(_GEOHASH_BASE32)}
 _EVENT_KIND_GEOHASH_MESSAGE = 20000
 _EVENT_KIND_GEOHASH_PRESENCE = 20001
 _GEORELAYS_URL = "https://raw.githubusercontent.com/permissionlesstech/georelays/refs/heads/main/nostr_relays.csv"
+_DEFAULT_POW_MAX_ITERATIONS = 2_000_000
 
 
 @dataclass(slots=True, frozen=True)
@@ -85,6 +89,7 @@ def create_ephemeral_geohash_event(
     nickname: str | None = None,
     teleported: bool = False,
     created_at: int | None = None,
+    pow_difficulty: int = 0,
 ) -> dict[str, object]:
     normalized = normalize_geohash(geohash)
     trimmed = content.strip()
@@ -102,6 +107,10 @@ def create_ephemeral_geohash_event(
         "tags": tags,
         "content": trimmed,
     }
+    if pow_difficulty < 0:
+        raise ValueError("pow difficulty must be non-negative")
+    if pow_difficulty > 0:
+        event = mine_event_pow(event, pow_difficulty)
     digest = event_digest(event)
     signature = PrivateKey(bytes.fromhex(identity.private_key_hex)).sign_schnorr(digest).hex()
     event["id"] = digest.hex()
@@ -136,6 +145,54 @@ def verify_event_signature(event: dict[str, object]) -> bool:
         return PublicKeyXOnly(pubkey).verify(signature, digest)
     except ValueError:
         return False
+
+
+def event_pow_difficulty(event_id_hex: str) -> int:
+    count = 0
+    for character in event_id_hex.strip().lower():
+        nibble = int(character, 16)
+        if nibble == 0:
+            count += 4
+            continue
+        if nibble == 1:
+            count += 3
+        elif nibble in (2, 3):
+            count += 2
+        elif nibble in (4, 5, 6, 7):
+            count += 1
+        break
+    return count
+
+
+def mine_event_pow(
+    event: dict[str, object],
+    target_difficulty: int,
+    *,
+    max_iterations: int = _DEFAULT_POW_MAX_ITERATIONS,
+) -> dict[str, object]:
+    if target_difficulty <= 0:
+        return dict(event)
+    if max_iterations <= 0:
+        raise ValueError("max_iterations must be positive")
+
+    base_event = dict(event)
+    base_tags = [
+        [str(part) for part in tag]
+        for tag in event.get("tags", [])
+        if isinstance(tag, list) and not (tag and str(tag[0]) == "nonce")
+    ]
+    nonce = secrets.randbelow(1_000_000)
+    created_at = int(base_event["created_at"])
+    for _ in range(max_iterations):
+        candidate = dict(base_event)
+        candidate["created_at"] = created_at
+        candidate["tags"] = base_tags + [["nonce", str(nonce), str(target_difficulty)]]
+        digest = event_digest(candidate)
+        if event_pow_difficulty(digest.hex()) >= target_difficulty:
+            candidate["id"] = digest.hex()
+            return candidate
+        nonce += 1
+    raise RuntimeError(f"failed to mine Nostr PoW difficulty {target_difficulty}")
 
 
 def event_geohash(event: dict[str, object]) -> str | None:
@@ -269,6 +326,7 @@ class GeoChatDaemon:
         self._watch_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._watched_geohashes: list[str] = []
         self._relay_entries: list[GeoRelayEntry] = []
+        self._recent_event_ids = ExpiringSet(ttl_seconds=600.0, max_entries=10_000)
 
     async def start(self, geohashes: list[str]) -> None:
         if geohashes:
@@ -305,7 +363,7 @@ class GeoChatDaemon:
             self._watch_tasks[key] = asyncio.create_task(self._watch_loop(relay_url, geohash))
         self._watched_geohashes = normalized
 
-    async def publish(self, geohash: str, content: str) -> dict[str, object]:
+    async def publish(self, geohash: str, content: str, *, pow_difficulty: int = 0) -> dict[str, object]:
         normalized = normalize_geohash(geohash)
         if not self._relay_entries:
             self._relay_entries = load_relay_entries(self.relay_cache_path)
@@ -315,6 +373,7 @@ class GeoChatDaemon:
             geohash=normalized,
             identity=identity,
             nickname=self.nickname,
+            pow_difficulty=pow_difficulty,
         )
         relays = closest_relays(self._relay_entries, normalized)
         if not relays:
@@ -372,5 +431,10 @@ class GeoChatDaemon:
         if not verify_event_signature(event):
             return
         if event.get("pubkey") == derive_nostr_identity(self.seed, geohash).public_key_hex:
+            return
+        event_id = str(event.get("id") or "")
+        if not event_id:
+            return
+        if self._recent_event_ids.mark_seen(event_id):
             return
         self.on_message(event)

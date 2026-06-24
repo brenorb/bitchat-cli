@@ -24,10 +24,11 @@ def test_mesh_inbox_parser_routes_to_public_inbox_handler() -> None:
 def test_geo_send_parser_routes_to_geo_send_handler() -> None:
     parser = cli.build_parser()
 
-    args = parser.parse_args(["geo", "send", "#u4pruy", "hello geo"])
+    args = parser.parse_args(["geo", "send", "#u4pruy", "--pow", "12", "hello geo"])
 
     assert args.handler is app.run_geo_send
     assert args.geohash == "#u4pruy"
+    assert args.pow == 12
     assert args.message == "hello geo"
 
 

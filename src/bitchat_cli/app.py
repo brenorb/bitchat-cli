@@ -717,10 +717,16 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                 elif command == "geo_send":
                     geohash = str(payload.get("geohash") or "")
                     content = str(payload.get("content") or "")
+                    try:
+                        pow_difficulty = int(payload.get("pow_difficulty") or 0)
+                    except (TypeError, ValueError):
+                        pow_difficulty = -1
                     if not geohash or not content:
                         response = {"ok": False, "error": "missing geohash or content"}
+                    elif pow_difficulty < 0:
+                        response = {"ok": False, "error": "invalid pow_difficulty"}
                     else:
-                        event = await geochat.publish(geohash, content)
+                        event = await geochat.publish(geohash, content, pow_difficulty=pow_difficulty)
                         now = datetime.fromtimestamp(int(event["created_at"]), tz=timezone.utc)
                         message_store.append(
                             direction="outbound",
@@ -1158,6 +1164,9 @@ def run_geo_send(args: argparse.Namespace) -> int:
     except RuntimeError as exc:
         print(str(exc))
         return 1
+    if int(args.pow) < 0:
+        print("pow difficulty must be non-negative")
+        return 1
     try:
         _send_daemon_command(
             runtime,
@@ -1165,6 +1174,7 @@ def run_geo_send(args: argparse.Namespace) -> int:
                 "command": "geo_send",
                 "geohash": geohash,
                 "content": args.message,
+                "pow_difficulty": int(args.pow),
             },
         )
     except RuntimeError as exc:

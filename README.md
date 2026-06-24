@@ -58,6 +58,7 @@ uv run bitchat send "hello from daemon"
 uv run bitchat mesh send "hello #mesh"
 uv run bitchat geo watch add u4pruy
 uv run bitchat geo send u4pruy "hello #u4pruy"
+uv run bitchat geo send u4pruy --pow 12 "hello with PoW"
 uv run bitchat geo inbox u4pruy --tail 20
 uv run bitchat peers
 uv run bitchat inbox --tail 20
@@ -104,9 +105,15 @@ Behavior notes:
 - `geo send <geohash> ...` publishes a real kind `20000` geohash-scoped Nostr
   event, signed with the same deterministic HMAC-derived per-geohash identity
   shape the macOS app uses.
+- `geo send <geohash> --pow <bits> ...` also mines the same NIP-13-style
+  `["nonce", value, difficulty]` tag the Android app expects when geohash PoW
+  is enabled. The CLI defaults to `--pow 0`, matching the official app's
+  default of leaving PoW disabled.
 - The daemon caches the official `permissionlesstech/georelays` CSV locally and
   picks the closest relays to the target geohash center, matching the app's
   geohash relay selection model at a smaller implementation scope.
+- Geohash inbound events are deduplicated by Nostr event ID before persistence,
+  so the same relay fanout no longer appears repeated in `geo inbox`.
 - `inbox` is the `#mesh` view for the BLE public conversation, and `mesh send`
   / `mesh inbox` expose that same scope explicitly in the CLI.
 - `geo inbox <geohash>` is the inbound view for one location channel.
