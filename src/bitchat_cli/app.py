@@ -18,6 +18,7 @@ from .state import ActiveSessionLease, MessageStore, PeerStore, RuntimePaths, St
 from .transport import BLEChatTransport
 
 _PERIPHERAL_SUBSCRIBE_ANNOUNCE_DELAY_SECONDS = 0.4
+_MESH_CONVERSATION_ID = "mesh"
 
 
 def _clear_screen() -> None:
@@ -281,6 +282,7 @@ async def run_chat(args: argparse.Namespace) -> int:
             timestamp=timestamp,
             peer_id=peer_id,
             message_id=message_id,
+            conversation_id=_MESH_CONVERSATION_ID,
         )
         print(f"\n[{ts}] <{sender}> {content}", flush=True)
 
@@ -569,6 +571,7 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                 timestamp=timestamp,
                 peer_id=peer_id,
                 message_id=message_id,
+                conversation_id=_MESH_CONVERSATION_ID,
             )
             line = f"{timestamp.astimezone(timezone.utc).isoformat()} <{sender}> {content}"
             print(line, file=log_handle, flush=True)
@@ -671,6 +674,7 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                             content=content,
                             timestamp=now,
                             peer_id=state.identity.peer_id,
+                            conversation_id=_MESH_CONVERSATION_ID,
                         )
                         response = {"ok": True}
                 elif command == "dm_mark_read":
@@ -963,7 +967,9 @@ def run_inbox(args: argparse.Namespace) -> int:
     records = [
         row
         for row in records
-        if row.get("direction") == "inbound" and row.get("scope", "public") == "public"
+        if row.get("direction") == "inbound"
+        and row.get("scope", "public") == "public"
+        and str(row.get("conversation_id") or _MESH_CONVERSATION_ID) == _MESH_CONVERSATION_ID
     ]
     if args.tail is not None:
         records = records[-args.tail :]
@@ -977,7 +983,7 @@ def run_inbox(args: argparse.Namespace) -> int:
         timestamp = row["timestamp"]
         sender = row["sender"]
         content = row["content"]
-        print(f"{timestamp} <{sender}> {content}")
+        print(f"{timestamp} #mesh <{sender}> {content}")
     return 0
 
 

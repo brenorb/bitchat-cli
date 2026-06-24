@@ -57,6 +57,18 @@ def build_parser() -> argparse.ArgumentParser:
     inbox.add_argument("--tail", type=int, help="Show only the last N inbound messages")
     inbox.set_defaults(handler=run_inbox)
 
+    mesh = subparsers.add_parser("mesh", help="Work with the public #mesh conversation")
+    mesh_subparsers = mesh.add_subparsers(dest="mesh_command", required=True)
+
+    mesh_inbox = mesh_subparsers.add_parser("inbox", help="Show recorded #mesh messages")
+    mesh_inbox.add_argument("--json", action="store_true", help="Output JSON")
+    mesh_inbox.add_argument("--tail", type=int, help="Show only the last N inbound messages")
+    mesh_inbox.set_defaults(handler=run_inbox)
+
+    mesh_send = mesh_subparsers.add_parser("send", help="Send one public message to #mesh through the background daemon")
+    mesh_send.add_argument("message", help="Message body")
+    mesh_send.set_defaults(handler=run_send)
+
     send = subparsers.add_parser("send", help="Send one public message through the background daemon")
     send.add_argument("message", help="Message body")
     send.set_defaults(handler=run_send)

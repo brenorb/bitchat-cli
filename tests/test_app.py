@@ -255,6 +255,47 @@ def test_run_inbox_ignores_private_dm_records(tmp_path: Path, monkeypatch, capsy
     assert "secret hello" not in captured.out
 
 
+def test_run_inbox_limits_public_view_to_mesh_conversation(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    store = MessageStore(runtime.inbox_path)
+    timestamp = datetime(2026, 6, 24, 0, 9, 44, tzinfo=timezone.utc)
+    store.append(
+        direction="inbound",
+        sender="bubbles",
+        content="mesh hello",
+        timestamp=timestamp,
+        peer_id="abcd",
+        scope="public",
+        conversation_id="mesh",
+    )
+    store.append(
+        direction="inbound",
+        sender="bubbles",
+        content="legacy hello",
+        timestamp=timestamp,
+        peer_id="abcd",
+        scope="public",
+    )
+    store.append(
+        direction="inbound",
+        sender="bubbles",
+        content="other channel",
+        timestamp=timestamp,
+        peer_id="abcd",
+        scope="public",
+        conversation_id="somewhere-else",
+    )
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+
+    exit_code = app.run_inbox(argparse.Namespace(json=False, tail=None))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "mesh hello" in captured.out
+    assert "legacy hello" in captured.out
+    assert "other channel" not in captured.out
+
+
 def test_run_dm_inbox_summarizes_private_conversations(tmp_path: Path, monkeypatch, capsys) -> None:
     runtime = RuntimePaths(tmp_path)
     identity = Identity.generate()

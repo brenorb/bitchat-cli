@@ -4,6 +4,7 @@
 
 Current scope:
 
+- `#mesh` as the CLI's explicit public conversation surface
 - Real BitChat mainnet BLE UUIDs
 - Official announce packet format
 - Announce packets include current direct-neighbor hints from live connected peers
@@ -21,6 +22,7 @@ Current scope:
 
 Still not implemented:
 
+- Private channels beyond the mesh public conversation
 - File transfer
 - Nostr geohash chat
 
@@ -52,8 +54,10 @@ interactive chat is open:
 uv run bitchat daemon start --nickname breno
 uv run bitchat daemon status
 uv run bitchat send "hello from daemon"
+uv run bitchat mesh send "hello #mesh"
 uv run bitchat peers
 uv run bitchat inbox --tail 20
+uv run bitchat mesh inbox --tail 20
 uv run bitchat dm send @bubbles "hello from daemon"
 uv run bitchat dm inbox
 uv run bitchat dm history @bubbles
@@ -90,6 +94,8 @@ Behavior notes:
   are currently attached. It also shows a short bounded history of recent
   peripheral subscribe/unsubscribe/write events to make phone-to-daemon testing
   debuggable without catching the exact moment live.
+- `inbox` is the `#mesh` view for the BLE public conversation, and `mesh send`
+  / `mesh inbox` expose that same scope explicitly in the CLI.
 - The macOS peripheral endpoint now exposes the same BLE characteristic surface
   the official app does for inbound writes: notify, read, write, and
   write-without-response.
