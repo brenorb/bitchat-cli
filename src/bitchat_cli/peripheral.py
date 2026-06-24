@@ -5,6 +5,7 @@ import sys
 from collections import deque
 from typing import Callable, Protocol
 
+import libdispatch
 
 SystemLogger = Callable[[str], None]
 WriteHandler = Callable[[str, bytes], None]
@@ -147,6 +148,18 @@ def _delegate_class():
     return PeripheralManagerDelegate
 
 
+def _create_dispatch_queue():
+    return libdispatch.dispatch_queue_create(b"bitchat.peripheral", None)
+
+
+def _create_peripheral_manager(core_bluetooth, delegate, queue):
+    return core_bluetooth.CBPeripheralManager.alloc().initWithDelegate_queue_options_(
+        delegate,
+        queue,
+        None,
+    )
+
+
 class MacOSPeripheralEndpoint:
     def __init__(
         self,
@@ -178,13 +191,10 @@ class MacOSPeripheralEndpoint:
         self._pending_updates: deque[tuple[bytes, tuple[object, ...] | None]] = deque()
         self._characteristic = None
         self._service = None
+        self._dispatch_queue = _create_dispatch_queue()
         delegate_class = _delegate_class()
         self._delegate = delegate_class.alloc().initWithEndpoint_(self)
-        self._manager = CoreBluetooth.CBPeripheralManager.alloc().initWithDelegate_queue_options_(
-            self._delegate,
-            None,
-            None,
-        )
+        self._manager = _create_peripheral_manager(CoreBluetooth, self._delegate, self._dispatch_queue)
 
     def start(self) -> None:
         self._started = True
