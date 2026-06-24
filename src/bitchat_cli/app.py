@@ -8,6 +8,7 @@ import signal
 import socket
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -709,21 +710,14 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
         )
 
         stop_event = asyncio.Event()
-
-        def _request_stop(_signum, _frame) -> None:
-            stop_event.set()
-
-        old_sigint = signal.signal(signal.SIGINT, _request_stop)
-        old_sigterm = signal.signal(signal.SIGTERM, _request_stop)
+        cleanup_signal_handlers = _install_stop_signal_handlers(stop_event)
         daemon_log(f"Daemon starting with nickname={state.nickname} peer_id={state.identity.peer_id}.")
         await transport.start()
         await stop_event.wait()
         daemon_log("Daemon stopping.")
     finally:
-        if "old_sigint" in locals():
-            signal.signal(signal.SIGINT, old_sigint)
-        if "old_sigterm" in locals():
-            signal.signal(signal.SIGTERM, old_sigterm)
+        if "cleanup_signal_handlers" in locals():
+            cleanup_signal_handlers()
         if "transport" in locals():
             await transport.stop()
         if "daemon_server" in locals():
@@ -796,6 +790,60 @@ def run_daemon_start(args: argparse.Namespace) -> int:
     return 0
 
 
+def _clear_daemon_runtime_files(runtime: RuntimePaths, pid: int) -> None:
+    runtime.daemon_pid_path.unlink(missing_ok=True)
+    lease = ActiveSessionLease(runtime.radio_pid_path)
+    owner_pid = lease.read_owner_pid()
+    if owner_pid == pid:
+        runtime.radio_pid_path.unlink(missing_ok=True)
+
+
+def _wait_for_daemon_exit(
+    runtime: RuntimePaths,
+    pid: int,
+    *,
+    timeout_seconds: float = 5.0,
+    poll_interval_seconds: float = 0.1,
+    is_running=None,
+) -> bool:
+    check_running = is_running or pid_is_running
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not check_running(pid):
+            _clear_daemon_runtime_files(runtime, pid)
+            return True
+        time.sleep(poll_interval_seconds)
+    if not check_running(pid):
+        _clear_daemon_runtime_files(runtime, pid)
+        return True
+    return False
+
+
+def _install_stop_signal_handlers(stop_event: asyncio.Event):
+    loop = asyncio.get_running_loop()
+    try:
+        loop.add_signal_handler(signal.SIGINT, stop_event.set)
+        loop.add_signal_handler(signal.SIGTERM, stop_event.set)
+
+        def cleanup() -> None:
+            loop.remove_signal_handler(signal.SIGINT)
+            loop.remove_signal_handler(signal.SIGTERM)
+
+        return cleanup
+    except (NotImplementedError, RuntimeError):
+        def _request_stop(_signum, _frame) -> None:
+            stop_event.set()
+
+        old_sigint = signal.signal(signal.SIGINT, _request_stop)
+        old_sigterm = signal.signal(signal.SIGTERM, _request_stop)
+
+        def cleanup() -> None:
+            signal.signal(signal.SIGINT, old_sigint)
+            signal.signal(signal.SIGTERM, old_sigterm)
+
+        return cleanup
+
+
 def run_daemon_stop(_args: argparse.Namespace) -> int:
     runtime = RuntimePaths()
     if not runtime.daemon_pid_path.exists():
@@ -814,8 +862,11 @@ def run_daemon_stop(_args: argparse.Namespace) -> int:
         return 0
 
     os.kill(pid, signal.SIGTERM)
-    print(f"sent SIGTERM to daemon (pid {pid})")
-    return 0
+    if _wait_for_daemon_exit(runtime, pid):
+        print(f"stopped daemon (pid {pid})")
+        return 0
+    print(f"sent SIGTERM to daemon (pid {pid}); still shutting down")
+    return 1
 
 
 def run_daemon_status(_args: argparse.Namespace) -> int:

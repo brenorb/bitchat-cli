@@ -313,6 +313,104 @@ def test_run_daemon_start_uses_repo_src_in_pythonpath(tmp_path: Path, monkeypatc
     assert "43210" in captured.out
 
 
+def test_run_daemon_stop_waits_for_exit_and_cleans_runtime_files(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    runtime.root.mkdir(parents=True, exist_ok=True)
+    runtime.daemon_pid_path.write_text("43210\n", encoding="utf-8")
+    runtime.radio_pid_path.write_text("43210\n", encoding="utf-8")
+    seen: list[tuple[int, int]] = []
+    polls = iter([True, False])
+
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+    monkeypatch.setattr(app.os, "kill", lambda pid, sig: seen.append((pid, sig)))
+    monkeypatch.setattr(app, "pid_is_running", lambda pid: next(polls))
+    monkeypatch.setattr(app.time, "sleep", lambda _seconds: None)
+
+    exit_code = app.run_daemon_stop(argparse.Namespace())
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert seen == [(43210, app.signal.SIGTERM)]
+    assert runtime.daemon_pid_path.exists() is False
+    assert runtime.radio_pid_path.exists() is False
+    assert "stopped daemon (pid 43210)" in captured.out
+
+
+def test_run_daemon_stop_reports_timeout_when_process_stays_up(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    runtime.root.mkdir(parents=True, exist_ok=True)
+    runtime.daemon_pid_path.write_text("43210\n", encoding="utf-8")
+    runtime.radio_pid_path.write_text("43210\n", encoding="utf-8")
+    seen: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+    monkeypatch.setattr(app.os, "kill", lambda pid, sig: seen.append((pid, sig)))
+    monkeypatch.setattr(app, "pid_is_running", lambda _pid: True)
+    monkeypatch.setattr(app.time, "sleep", lambda _seconds: None)
+    monotonic_values = iter([0.0, 1.0, 2.0, 3.0, 4.0, 5.1])
+    monkeypatch.setattr(app.time, "monotonic", lambda: next(monotonic_values))
+
+    exit_code = app.run_daemon_stop(argparse.Namespace())
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert seen == [(43210, app.signal.SIGTERM)]
+    assert runtime.daemon_pid_path.exists() is True
+    assert runtime.radio_pid_path.exists() is True
+    assert "still shutting down" in captured.out
+
+
+def test_install_stop_signal_handlers_prefers_event_loop_handlers() -> None:
+    stop_event = asyncio.Event()
+    seen: list[tuple[str, int, object | None]] = []
+
+    class FakeLoop:
+        def add_signal_handler(self, sig, callback) -> None:
+            seen.append(("add", sig, callback))
+
+        def remove_signal_handler(self, sig) -> None:
+            seen.append(("remove", sig, None))
+
+    original_get_running_loop = app.asyncio.get_running_loop
+    app.asyncio.get_running_loop = lambda: FakeLoop()  # type: ignore[assignment]
+    try:
+        cleanup = app._install_stop_signal_handlers(stop_event)
+        cleanup()
+    finally:
+        app.asyncio.get_running_loop = original_get_running_loop  # type: ignore[assignment]
+
+    assert [item[:2] for item in seen] == [
+        ("add", app.signal.SIGINT),
+        ("add", app.signal.SIGTERM),
+        ("remove", app.signal.SIGINT),
+        ("remove", app.signal.SIGTERM),
+    ]
+    seen[0][2]()  # type: ignore[misc]
+    assert stop_event.is_set() is True
+
+
+def test_install_stop_signal_handlers_falls_back_to_signal_module(monkeypatch) -> None:
+    stop_event = asyncio.Event()
+    seen: list[tuple[str, int]] = []
+
+    class FakeLoop:
+        def add_signal_handler(self, _sig, _callback) -> None:
+            raise NotImplementedError
+
+    monkeypatch.setattr(app.asyncio, "get_running_loop", lambda: FakeLoop())
+    monkeypatch.setattr(app.signal, "signal", lambda sig, handler: seen.append(("set", sig)) or "old-handler")
+
+    cleanup = app._install_stop_signal_handlers(stop_event)
+    cleanup()
+
+    assert seen == [
+        ("set", app.signal.SIGINT),
+        ("set", app.signal.SIGTERM),
+        ("set", app.signal.SIGINT),
+        ("set", app.signal.SIGTERM),
+    ]
+
+
 def test_run_dm_history_emits_read_receipts_for_unread_inbound_messages(tmp_path: Path, monkeypatch, capsys) -> None:
     runtime = RuntimePaths(tmp_path)
     identity = Identity.generate()

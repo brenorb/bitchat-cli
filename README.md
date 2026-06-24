@@ -81,6 +81,9 @@ Behavior notes:
 - `messages.jsonl` now suppresses repeated writes for the same stable
   `message_id`, so sync replay after reconnect or restart does not re-persist
   already recorded public packets, and `inbox` stays deduplicated too.
+- `daemon stop` now waits briefly for a clean shutdown and lease cleanup, so an
+  immediate `daemon start` is less likely to trip over stale `daemon.pid` or
+  `radio.pid` state.
 - `send` queues a public channel message through the running daemon, so you can
   test outbound delivery without stopping the background listener to open
   interactive `chat`.
