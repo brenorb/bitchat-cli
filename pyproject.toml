@@ -8,6 +8,8 @@ dependencies = [
   "bleak>=0.22.3",
   "coincurve>=21.0.0",
   "cryptography>=45.0.0",
+  "httpx[socks]>=0.28.1",
+  "python-socks[asyncio]>=2.7.1",
   "websockets>=15.0.1",
 ]
 

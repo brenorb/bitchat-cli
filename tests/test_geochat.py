@@ -97,6 +97,36 @@ def test_identity_derivation_matches_upstream_hmac_shape() -> None:
     assert geochat._candidate_geohash_private_key(seed, geohash, 0) == expected_candidate
 
 
+def test_encode_geohash_levels_matches_expected_prefixes() -> None:
+    levels = geochat.encode_geohash_levels(57.64911, 10.40744)
+
+    assert levels["region"] == "u4"
+    assert levels["province"] == "u4pr"
+    assert levels["city"] == "u4pru"
+    assert levels["neighborhood"] == "u4pruy"
+    assert levels["block"] == "u4pruyd"
+    assert levels["building"] == "u4pruydq"
+
+
+def test_geohash_levels_returns_upstream_named_prefixes() -> None:
+    levels = geochat.geohash_levels("u4pruydqqvj")
+
+    assert levels["region"] == "u4"
+    assert levels["province"] == "u4pr"
+    assert levels["city"] == "u4pru"
+    assert levels["neighborhood"] == "u4pruy"
+    assert levels["block"] == "u4pruyd"
+    assert levels["building"] == "u4pruydq"
+
+
+def test_decode_bounds_contains_center() -> None:
+    lat_bounds, lon_bounds = geochat.decode_bounds("u4pruyd")
+    center_lat, center_lon = geochat.decode_center("u4pruyd")
+
+    assert lat_bounds[0] <= center_lat <= lat_bounds[1]
+    assert lon_bounds[0] <= center_lon <= lon_bounds[1]
+
+
 def test_geochat_daemon_loads_relays_lazily() -> None:
     async def exercise() -> None:
         loads: list[Path] = []

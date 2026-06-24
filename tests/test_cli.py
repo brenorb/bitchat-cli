@@ -69,3 +69,32 @@ def test_geo_who_parser_routes_to_geo_who_handler() -> None:
     assert args.handler is app.run_geo_who
     assert args.geohash == "#u4pruy"
     assert args.json is True
+
+
+def test_geo_encode_parser_routes_to_geo_encode_handler() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["geo", "encode", "--lat", "37.7", "--lon", "-122.4", "--all-levels"])
+
+    assert args.handler is app.run_geo_encode
+    assert args.all_levels is True
+
+
+def test_social_link_parser_routes_to_social_link_handler() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["social", "link", "@bubbles", "npub1test"])
+
+    assert args.handler is app.run_social_link
+    assert args.target == "@bubbles"
+    assert args.npub == "npub1test"
+
+
+def test_network_proxy_set_parser_routes_to_proxy_set_handler() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["network", "proxy", "set", "tor", "--policy", "require"])
+
+    assert args.handler is app.run_network_proxy_set
+    assert args.target == "tor"
+    assert args.policy == "require"

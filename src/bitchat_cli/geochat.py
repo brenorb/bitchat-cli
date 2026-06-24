@@ -13,13 +13,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 from urllib.error import URLError
-from urllib.request import urlopen
 
 from coincurve import PrivateKey, PublicKeyXOnly
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
 from .dedupe import ExpiringSet
+from .network import NetworkConfig
 
 _GEOHASH_ALLOWED = set("0123456789bcdefghjkmnpqrstuvwxyz")
 _GEOHASH_BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz"
@@ -31,6 +31,14 @@ _DEFAULT_POW_MAX_ITERATIONS = 2_000_000
 _DEFAULT_PRESENCE_INTERVAL_RANGE_SECONDS = (40.0, 80.0)
 _DEFAULT_PRESENCE_STEP_DELAY_RANGE_SECONDS = (1.0, 10.0)
 _DEFAULT_PRESENCE_IDLE_SECONDS = 10.0
+_GEOHASH_LEVEL_PRECISIONS = {
+    "region": 2,
+    "province": 4,
+    "city": 5,
+    "neighborhood": 6,
+    "block": 7,
+    "building": 8,
+}
 
 
 @dataclass(slots=True, frozen=True)
@@ -270,6 +278,11 @@ def event_display_name(event: dict[str, object]) -> str:
 
 
 def decode_center(geohash: str) -> tuple[float, float]:
+    lat_interval, lon_interval = decode_bounds(geohash)
+    return (lat_interval[0] + lat_interval[1]) / 2, (lon_interval[0] + lon_interval[1]) / 2
+
+
+def decode_bounds(geohash: str) -> tuple[tuple[float, float], tuple[float, float]]:
     normalized = normalize_geohash(geohash)
     lat_interval = [-90.0, 90.0]
     lon_interval = [-180.0, 180.0]
@@ -290,7 +303,71 @@ def decode_center(geohash: str) -> tuple[float, float]:
                 else:
                     lat_interval[1] = midpoint
             is_even = not is_even
-    return (lat_interval[0] + lat_interval[1]) / 2, (lon_interval[0] + lon_interval[1]) / 2
+    return (lat_interval[0], lat_interval[1]), (lon_interval[0], lon_interval[1])
+
+
+def encode_geohash(lat: float, lon: float, *, precision: int) -> str:
+    if precision <= 0 or precision > 12:
+        raise ValueError("precision must be between 1 and 12")
+    if not (-90.0 <= lat <= 90.0):
+        raise ValueError("latitude must be between -90 and 90")
+    if not (-180.0 <= lon <= 180.0):
+        raise ValueError("longitude must be between -180 and 180")
+
+    lat_interval = [-90.0, 90.0]
+    lon_interval = [-180.0, 180.0]
+    bits = [16, 8, 4, 2, 1]
+    bit = 0
+    ch = 0
+    even = True
+    output: list[str] = []
+    while len(output) < precision:
+        if even:
+            midpoint = (lon_interval[0] + lon_interval[1]) / 2
+            if lon >= midpoint:
+                ch |= bits[bit]
+                lon_interval[0] = midpoint
+            else:
+                lon_interval[1] = midpoint
+        else:
+            midpoint = (lat_interval[0] + lat_interval[1]) / 2
+            if lat >= midpoint:
+                ch |= bits[bit]
+                lat_interval[0] = midpoint
+            else:
+                lat_interval[1] = midpoint
+        even = not even
+        if bit < 4:
+            bit += 1
+            continue
+        output.append(_GEOHASH_BASE32[ch])
+        bit = 0
+        ch = 0
+    return "".join(output)
+
+
+def geohash_precision_for_level(level: str) -> int:
+    normalized = level.strip().lower()
+    if normalized not in _GEOHASH_LEVEL_PRECISIONS:
+        names = ", ".join(sorted(_GEOHASH_LEVEL_PRECISIONS))
+        raise ValueError(f"level must be one of: {names}")
+    return _GEOHASH_LEVEL_PRECISIONS[normalized]
+
+
+def geohash_levels(geohash: str) -> dict[str, str]:
+    normalized = normalize_geohash(geohash)
+    levels: dict[str, str] = {}
+    for level, precision in _GEOHASH_LEVEL_PRECISIONS.items():
+        if len(normalized) >= precision:
+            levels[level] = normalized[:precision]
+    return levels
+
+
+def encode_geohash_levels(lat: float, lon: float) -> dict[str, str]:
+    return {
+        level: encode_geohash(lat, lon, precision=precision)
+        for level, precision in _GEOHASH_LEVEL_PRECISIONS.items()
+    }
 
 
 def closest_relays(entries: list[GeoRelayEntry], geohash: str, *, count: int = 5) -> list[str]:
@@ -299,10 +376,10 @@ def closest_relays(entries: list[GeoRelayEntry], geohash: str, *, count: int = 5
     return [f"wss://{entry.host}" for entry in ranked[:count]]
 
 
-def load_relay_entries(cache_path: Path) -> list[GeoRelayEntry]:
+def load_relay_entries(cache_path: Path, network_config: NetworkConfig | None = None) -> list[GeoRelayEntry]:
     text = cache_path.read_text(encoding="utf-8") if cache_path.exists() else ""
     if not text:
-        text = _download_relay_csv()
+        text = _download_relay_csv(network_config=network_config)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(text, encoding="utf-8")
     entries = _parse_relay_csv(text)
@@ -310,18 +387,26 @@ def load_relay_entries(cache_path: Path) -> list[GeoRelayEntry]:
         return entries
     if cache_path.exists():
         cache_path.unlink(missing_ok=True)
-    text = _download_relay_csv()
+    text = _download_relay_csv(network_config=network_config)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(text, encoding="utf-8")
     return _parse_relay_csv(text)
 
 
-def _download_relay_csv() -> str:
+def _download_relay_csv(*, network_config: NetworkConfig | None = None) -> str:
+    config = network_config or NetworkConfig(
+        proxy_mode="disabled",
+        proxy_url=None,
+        proxy_policy="prefer",
+        geo_lookup_provider="nominatim",
+    )
     try:
-        with urlopen(_GEORELAYS_URL, timeout=10) as response:
-            return response.read().decode("utf-8")
-    except URLError as exc:
-        raise RuntimeError(f"failed to fetch georelays directory: {exc.reason}") from exc
+        with config.make_http_client(user_agent="bitchat-cli georelays/1") as client:
+            response = client.get(_GEORELAYS_URL)
+            response.raise_for_status()
+            return response.text
+    except Exception as exc:
+        raise RuntimeError(f"failed to fetch georelays directory: {exc}") from exc
 
 
 def _parse_relay_csv(text: str) -> list[GeoRelayEntry]:
@@ -365,6 +450,7 @@ class GeoChatDaemon:
         nickname: str,
         on_message: Callable[[dict[str, object]], None],
         system_log: Callable[[str], None] | None = None,
+        network_config: NetworkConfig | None = None,
         presence_interval_range_seconds: tuple[float, float] = _DEFAULT_PRESENCE_INTERVAL_RANGE_SECONDS,
         presence_step_delay_range_seconds: tuple[float, float] = _DEFAULT_PRESENCE_STEP_DELAY_RANGE_SECONDS,
         presence_idle_seconds: float = _DEFAULT_PRESENCE_IDLE_SECONDS,
@@ -374,6 +460,12 @@ class GeoChatDaemon:
         self.nickname = nickname
         self.on_message = on_message
         self.system_log = system_log or (lambda _message: None)
+        self.network_config = network_config or NetworkConfig(
+            proxy_mode="disabled",
+            proxy_url=None,
+            proxy_policy="prefer",
+            geo_lookup_provider="nominatim",
+        )
         self.presence_interval_range_seconds = presence_interval_range_seconds
         self.presence_step_delay_range_seconds = presence_step_delay_range_seconds
         self.presence_idle_seconds = presence_idle_seconds
@@ -383,9 +475,15 @@ class GeoChatDaemon:
         self._recent_event_ids = ExpiringSet(ttl_seconds=600.0, max_entries=10_000)
         self._presence_task: asyncio.Task[None] | None = None
 
+    def _load_relay_entries(self) -> list[GeoRelayEntry]:
+        try:
+            return load_relay_entries(self.relay_cache_path, network_config=self.network_config)
+        except TypeError:
+            return load_relay_entries(self.relay_cache_path)
+
     async def start(self, geohashes: list[str]) -> None:
         if geohashes:
-            self._relay_entries = load_relay_entries(self.relay_cache_path)
+            self._relay_entries = self._load_relay_entries()
         if self._presence_task is None:
             self._presence_task = asyncio.create_task(self._presence_loop())
         await self.set_watches(geohashes)
@@ -406,7 +504,7 @@ class GeoChatDaemon:
     async def set_watches(self, geohashes: list[str]) -> None:
         normalized = sorted({normalize_geohash(item) for item in geohashes})
         if normalized and not self._relay_entries:
-            self._relay_entries = load_relay_entries(self.relay_cache_path)
+            self._relay_entries = self._load_relay_entries()
         desired: set[tuple[str, str]] = set()
         for geohash in normalized:
             for relay in closest_relays(self._relay_entries, geohash):
@@ -434,7 +532,7 @@ class GeoChatDaemon:
     ) -> dict[str, object]:
         normalized = normalize_geohash(geohash)
         if not self._relay_entries:
-            self._relay_entries = load_relay_entries(self.relay_cache_path)
+            self._relay_entries = self._load_relay_entries()
         identity = derive_nostr_identity(self.seed, normalized)
         event = create_ephemeral_geohash_event(
             content=content,
@@ -453,7 +551,7 @@ class GeoChatDaemon:
     async def publish_presence(self, geohash: str) -> dict[str, object]:
         normalized = normalize_geohash(geohash)
         if not self._relay_entries:
-            self._relay_entries = load_relay_entries(self.relay_cache_path)
+            self._relay_entries = self._load_relay_entries()
         identity = derive_nostr_identity(self.seed, normalized)
         event = create_geohash_presence_event(geohash=normalized, identity=identity)
         relays = closest_relays(self._relay_entries, normalized)
@@ -469,7 +567,13 @@ class GeoChatDaemon:
         }
 
     async def _publish_to_relay(self, relay_url: str, event: dict[str, object]) -> None:
-        async with ws_connect(relay_url, open_timeout=10, ping_interval=20, ping_timeout=20) as websocket:
+        async with ws_connect(
+            relay_url,
+            open_timeout=10,
+            ping_interval=20,
+            ping_timeout=20,
+            **self.network_config.websocket_proxy_argument(),
+        ) as websocket:
             await websocket.send(json.dumps(["EVENT", event], separators=(",", ":")))
 
     async def _watch_loop(self, relay_url: str, geohash: str) -> None:
@@ -481,7 +585,13 @@ class GeoChatDaemon:
         }
         while True:
             try:
-                async with ws_connect(relay_url, open_timeout=10, ping_interval=20, ping_timeout=20) as websocket:
+                async with ws_connect(
+                    relay_url,
+                    open_timeout=10,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    **self.network_config.websocket_proxy_argument(),
+                ) as websocket:
                     await websocket.send(
                         json.dumps(["REQ", subscription_id, filter_payload], separators=(",", ":"))
                     )
@@ -548,3 +658,43 @@ class GeoChatDaemon:
         if self._recent_event_ids.mark_seen(event_id):
             return
         self.on_message(event)
+
+
+def lookup_place(
+    query: str,
+    *,
+    network_config: NetworkConfig,
+    provider: str = "nominatim",
+    limit: int = 5,
+) -> list[dict[str, object]]:
+    if provider != "nominatim":
+        raise ValueError("unsupported provider")
+    with network_config.make_http_client(user_agent="bitchat-cli geolookup/1") as client:
+        response = client.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={
+                "q": query,
+                "format": "jsonv2",
+                "addressdetails": 1,
+                "limit": max(1, min(limit, 10)),
+            },
+        )
+        response.raise_for_status()
+        rows = response.json()
+    results: list[dict[str, object]] = []
+    for row in rows:
+        try:
+            lat = float(row["lat"])
+            lon = float(row["lon"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        results.append(
+            {
+                "label": str(row.get("display_name") or query),
+                "lat": lat,
+                "lon": lon,
+                "address": row.get("address") if isinstance(row.get("address"), dict) else {},
+                "levels": encode_geohash_levels(lat, lon),
+            }
+        )
+    return results

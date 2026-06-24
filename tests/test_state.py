@@ -268,5 +268,10 @@ def test_state_store_backfills_nostr_seed_and_geo_watches_for_legacy_state(tmp_p
 
     assert loaded.nickname == "legacy"
     assert len(loaded.nostr_device_seed_hex) == 64
+    assert len(loaded.nostr_private_key_hex) == 64
+    assert loaded.nostr_relays != []
+    assert loaded.network_proxy_mode == "disabled"
+    assert loaded.network_proxy_policy == "prefer"
     assert loaded.watched_geohashes == []
     assert reloaded.nostr_device_seed_hex == loaded.nostr_device_seed_hex
+    assert reloaded.nostr_private_key_hex == loaded.nostr_private_key_hex

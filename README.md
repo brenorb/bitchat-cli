@@ -20,12 +20,17 @@ Current scope:
 - Duplicate-safe multi-hop relay for public traffic and directed Noise packets
 - Local public-message, fragment, and public file-transfer sync over `REQUEST_SYNC` with official-style `RSR` responses
 - Private-message history capture plus `dm inbox` / `dm history`
+- Linked-peer Nostr DM fallback for offline text/receipt delivery
+- CLI-native social trust commands for linking, favoriting, blocking, and fingerprint inspection
+- Proxy-aware network policy for geohash relay traffic, lookup, and Nostr fallback
+- Offline geohash discovery helpers for region/province/city/neighborhood/block/building derivation
 - Offline protocol self-tests
 
 Still not implemented:
 
 - Presence counts and the full location-channel sheet model from the app UI
-- Nostr private messaging outside the Bluetooth mesh path
+- Nostr fallback for files
+- Geohash-scoped Nostr DMs
 
 ## Quick start
 
@@ -54,15 +59,24 @@ interactive chat is open:
 ```bash
 uv run bitchat daemon start --nickname breno
 uv run bitchat daemon status
+uv run bitchat network proxy set tor --policy require
+uv run bitchat network proxy status
 uv run bitchat send "hello from daemon"
 uv run bitchat mesh send "hello #mesh"
 uv run bitchat geo watch add u4pruy
 uv run bitchat geo send u4pruy "hello #u4pruy"
+uv run bitchat geo levels u4pruydqq
+uv run bitchat geo encode --lat 37.7749 --lon -122.4194 --all-levels
+uv run bitchat geo decode u4pruyd
+uv run bitchat geo lookup "Union Square, San Francisco"
 uv run bitchat geo send u4pruy --pow 12 "hello with PoW"
 uv run bitchat geo send u4pruy --teleport "hello from a teleported channel"
 uv run bitchat geo inbox u4pruy --tail 20
 uv run bitchat geo who u4pruy
 uv run bitchat peers
+uv run bitchat social link @bubbles <npub>
+uv run bitchat social favorite @bubbles
+uv run bitchat social fingerprint @bubbles
 uv run bitchat inbox --tail 20
 uv run bitchat mesh inbox --tail 20
 uv run bitchat dm send @bubbles "hello from daemon"
@@ -81,6 +95,7 @@ Daemon artifacts live under `~/.config/bitchat-cli/`:
 - `messages.jsonl` - recorded message history
 - `peers.json` - known peers learned from signed announce packets, keeping the
   latest observed address set per peer instead of a growing historical archive
+- `social.json` - explicit Nostr/social mappings and trust flags
 - `files/incoming` - inbound non-image transfers
 - `images/incoming` - inbound image transfers
 - `daemon.pid` - running daemon pid
@@ -109,9 +124,20 @@ Behavior notes:
 - `geo watch add/remove/list` manages the geohash channels the daemon keeps
   subscribed in the background, so location-channel messages can arrive while
   no interactive client is open.
+- `network proxy ...` sets one privacy policy for every remote path in the CLI
+  instead of sprinkling ad hoc proxy flags across commands. `--policy require`
+  is the fail-closed mode when you care more about privacy than convenience.
 - Watched geohashes with precision `<= 5` now emit periodic kind `20001`
   presence heartbeats in the background, matching the official app's
   coarse-location presence model.
+- `geo levels`, `geo encode`, and `geo decode` are fully offline; `geo lookup`
+  is the only place-name flow that may touch a third-party service, and it
+  does not persist queries or returned coordinates.
+- Upstream-compatible geohash naming in the CLI now maps:
+  region=`2`, province=`4`, city=`5`, neighborhood=`6`, block=`7`,
+  building=`8`.
+- `geo send` and `geo watch add` now warn before publishing or following
+  high-precision geohashes, and block/building precision requires `--force`.
 - `geo send <geohash> ...` publishes a real kind `20000` geohash-scoped Nostr
   event, signed with the same deterministic HMAC-derived per-geohash identity
   shape the macOS app uses.
@@ -173,6 +199,10 @@ Behavior notes:
   direct peers get a fresh public sync request.
 - Private messages are persisted separately from the public inbox and exposed
   through `bitchat dm inbox` and `bitchat dm history`.
+- `social link` + `social favorite` authorize Nostr DM fallback for one peer.
+  BLE stays first; if the daemon has no live BitChat link for that peer, text
+  DMs and read/delivery receipts can fall back to NIP-17 gift-wrapped Nostr
+  messages using the linked `npub`.
 - Only one CLI BLE session can own the radio at a time, so `chat` and `daemon`
   no longer run concurrently.
 

@@ -8,7 +8,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from coincurve import PrivateKey
+
 from .crypto import Identity
+
+_DEFAULT_NOSTR_RELAYS = [
+    "wss://relay.damus.io",
+    "wss://nos.lol",
+    "wss://relay.primal.net",
+    "wss://offchain.pub",
+]
 
 
 def default_app_dir() -> Path:
@@ -24,15 +33,28 @@ class AppState:
     nickname: str
     identity: Identity
     nostr_device_seed_hex: str
+    nostr_private_key_hex: str
+    nostr_relays: list[str]
+    network_proxy_mode: str
+    network_proxy_url: str | None
+    network_proxy_policy: str
+    geo_lookup_provider: str
     watched_geohashes: list[str]
 
     @classmethod
     def create(cls) -> "AppState":
         suffix = secrets.token_hex(2)
+        nostr_private_key = PrivateKey().to_hex()
         return cls(
             nickname=f"anon-{suffix}",
             identity=Identity.generate(),
             nostr_device_seed_hex=secrets.token_hex(32),
+            nostr_private_key_hex=nostr_private_key,
+            nostr_relays=list(_DEFAULT_NOSTR_RELAYS),
+            network_proxy_mode="disabled",
+            network_proxy_url=None,
+            network_proxy_policy="prefer",
+            geo_lookup_provider="nominatim",
             watched_geohashes=[],
         )
 
@@ -40,6 +62,12 @@ class AppState:
         data = {"nickname": self.nickname}
         data.update(self.identity.serialize())
         data["nostr_device_seed"] = self.nostr_device_seed_hex
+        data["nostr_private_key"] = self.nostr_private_key_hex
+        data["nostr_relays"] = list(self.nostr_relays)
+        data["network_proxy_mode"] = self.network_proxy_mode
+        data["network_proxy_url"] = self.network_proxy_url
+        data["network_proxy_policy"] = self.network_proxy_policy
+        data["geo_lookup_provider"] = self.geo_lookup_provider
         data["watched_geohashes"] = list(self.watched_geohashes)
         return data
 
@@ -54,6 +82,17 @@ class StateStore:
             self.save(state)
             return state
         data = json.loads(self.path.read_text())
+        nostr_private_key_hex = str(data.get("nostr_private_key") or "")
+        if len(nostr_private_key_hex) != 64:
+            nostr_private_key_hex = PrivateKey().to_hex()
+        raw_proxy_mode = str(data.get("network_proxy_mode") or "disabled").strip().lower()
+        network_proxy_mode = raw_proxy_mode if raw_proxy_mode in {"disabled", "system", "custom"} else "disabled"
+        raw_proxy_policy = str(data.get("network_proxy_policy") or "prefer").strip().lower()
+        network_proxy_policy = raw_proxy_policy if raw_proxy_policy in {"prefer", "require"} else "prefer"
+        raw_relays = data.get("nostr_relays", _DEFAULT_NOSTR_RELAYS)
+        nostr_relays = [str(item).strip() for item in raw_relays if str(item).strip()]
+        if not nostr_relays:
+            nostr_relays = list(_DEFAULT_NOSTR_RELAYS)
         state = AppState(
             nickname=data["nickname"],
             identity=Identity.from_hex(
@@ -61,13 +100,31 @@ class StateStore:
                 signing_private_key_hex=data["signing_private_key"],
             ),
             nostr_device_seed_hex=str(data.get("nostr_device_seed") or secrets.token_hex(32)),
+            nostr_private_key_hex=nostr_private_key_hex,
+            nostr_relays=nostr_relays,
+            network_proxy_mode=network_proxy_mode,
+            network_proxy_url=(
+                str(data.get("network_proxy_url")).strip()
+                if data.get("network_proxy_url") is not None and str(data.get("network_proxy_url")).strip()
+                else None
+            ),
+            network_proxy_policy=network_proxy_policy,
+            geo_lookup_provider=str(data.get("geo_lookup_provider") or "nominatim"),
             watched_geohashes=[
                 str(item)
                 for item in data.get("watched_geohashes", [])
                 if str(item)
             ],
         )
-        if "nostr_device_seed" not in data or "watched_geohashes" not in data:
+        if (
+            "nostr_device_seed" not in data
+            or "nostr_private_key" not in data
+            or "nostr_relays" not in data
+            or "network_proxy_mode" not in data
+            or "network_proxy_policy" not in data
+            or "geo_lookup_provider" not in data
+            or "watched_geohashes" not in data
+        ):
             self.save(state)
         return state
 
@@ -103,6 +160,10 @@ class RuntimePaths:
     @property
     def peers_path(self) -> Path:
         return self.root / "peers.json"
+
+    @property
+    def social_path(self) -> Path:
+        return self.root / "social.json"
 
     @property
     def georelays_cache_path(self) -> Path:
