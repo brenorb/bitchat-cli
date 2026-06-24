@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .constants import CHARACTERISTIC_UUID, SERVICE_UUID
+from .geochat import GeoChatDaemon, event_display_name, event_geohash, normalize_geohash
 from .peripheral import create_peripheral_endpoint, peripheral_supported
 from .state import ActiveSessionLease, MessageStore, PeerStore, RuntimePaths, StateStore, pid_is_running
 from .transport import BLEChatTransport
@@ -67,6 +68,11 @@ def _resolve_peer_record(records: list[dict[str, object]], raw_target: str) -> d
 def _read_dm_records(runtime: RuntimePaths) -> list[dict[str, object]]:
     rows = MessageStore(runtime.inbox_path).read_all(deduplicate=True)
     return [row for row in rows if row.get("scope") == "dm"]
+
+
+def _read_public_records(runtime: RuntimePaths) -> list[dict[str, object]]:
+    rows = MessageStore(runtime.inbox_path).read_all(deduplicate=True)
+    return [row for row in rows if row.get("direction") == "inbound" and row.get("scope", "public") == "public"]
 
 
 def _send_daemon_command(runtime: RuntimePaths, payload: dict[str, object]) -> dict[str, object]:
@@ -150,9 +156,10 @@ def doctor_payload(store: StateStore) -> dict[str, object]:
             "mesh_relay": True,
             "local_sync": True,
             "ble_peripheral": peripheral_supported(),
-            "nostr_geochat": False,
+            "nostr_geochat": True,
             "fragment_reassembly": True,
         },
+        "watched_geohashes": list(state.watched_geohashes),
     }
 
 
@@ -176,6 +183,8 @@ def run_doctor(args: argparse.Namespace) -> int:
     print(f"daemon_socket:      {payload['daemon']['socket_path']}")
     print(f"inbox_path:         {payload['daemon']['inbox_path']}")
     print(f"peers_path:         {payload['daemon']['peers_path']}")
+    watched_geohashes = payload.get("watched_geohashes") or []
+    print(f"watched_geohashes:  {', '.join('#' + item for item in watched_geohashes) or '-'}")
     print("scope:")
     for key, value in payload["scope"].items():
         print(f"  {key}: {value}")
@@ -610,6 +619,34 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                 flush=True,
             )
 
+        def daemon_geohash_message_log(event: dict[str, object]) -> None:
+            geohash = event_geohash(event)
+            if geohash is None:
+                return
+            raw_ts = int(event.get("created_at") or 0)
+            timestamp = datetime.fromtimestamp(raw_ts, tz=timezone.utc)
+            sender_name = event_display_name(event)
+            content = str(event.get("content") or "").strip()
+            kind = int(event.get("kind") or 0)
+            if kind == 20001:
+                return
+            message_store.append(
+                direction="inbound",
+                sender=sender_name,
+                content=content,
+                timestamp=timestamp,
+                peer_id=str(event.get("pubkey") or ""),
+                message_id=str(event.get("id") or ""),
+                scope="public",
+                conversation_id=geohash,
+                message_kind="geohash_message",
+            )
+            print(
+                f"{timestamp.astimezone(timezone.utc).isoformat()} #{geohash} <{sender_name}> {content}",
+                file=log_handle,
+                flush=True,
+            )
+
         def daemon_receipt_log(peer_id: str, receipt_type: str, message_id: str, timestamp: datetime) -> None:
             active_transport = transport_ref.get("value")
             peer = (
@@ -677,6 +714,31 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                             conversation_id=_MESH_CONVERSATION_ID,
                         )
                         response = {"ok": True}
+                elif command == "geo_send":
+                    geohash = str(payload.get("geohash") or "")
+                    content = str(payload.get("content") or "")
+                    if not geohash or not content:
+                        response = {"ok": False, "error": "missing geohash or content"}
+                    else:
+                        event = await geochat.publish(geohash, content)
+                        now = datetime.fromtimestamp(int(event["created_at"]), tz=timezone.utc)
+                        message_store.append(
+                            direction="outbound",
+                            sender=state.nickname,
+                            content=content,
+                            timestamp=now,
+                            peer_id=str(event["pubkey"]),
+                            message_id=str(event["id"]),
+                            scope="public",
+                            conversation_id=geohash,
+                            message_kind="geohash_message",
+                        )
+                        response = {"ok": True, "message_id": event["id"]}
+                elif command == "geo_watch_set":
+                    raw_geohashes = payload.get("geohashes") or []
+                    watched_geohashes = [str(item) for item in raw_geohashes if str(item)]
+                    await geochat.set_watches(watched_geohashes)
+                    response = {"ok": True, "geohashes": geochat.runtime_status()["watched_geohashes"]}
                 elif command == "dm_mark_read":
                     peer_id = str(payload.get("peer_id") or "")
                     raw_ids = payload.get("message_ids") or []
@@ -712,6 +774,8 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                             "peripheral_subscribers": transport.peripheral_endpoint.subscriber_count(),
                             "peripheral_addresses": list(transport.peripheral_endpoint.subscriber_addresses()),
                             "peripheral_recent_events": list(transport.peripheral_endpoint.recent_events()),
+                            "watched_geohashes": geochat.runtime_status()["watched_geohashes"],
+                            "geohash_relay_subscriptions": geochat.runtime_status()["relay_subscriptions"],
                         },
                     }
                 else:
@@ -743,6 +807,13 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
         )
         transport_ref["value"] = transport
         transport.seed_known_peers(peer_store.read_all())
+        geochat = GeoChatDaemon(
+            relay_cache_path=runtime.georelays_cache_path,
+            seed_hex=state.nostr_device_seed_hex,
+            nickname=state.nickname,
+            on_message=daemon_geohash_message_log,
+            system_log=daemon_log,
+        )
         daemon_server = await asyncio.start_unix_server(
             handle_daemon_client,
             path=str(runtime.daemon_socket_path),
@@ -752,6 +823,7 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
         cleanup_signal_handlers = _install_stop_signal_handlers(stop_event)
         daemon_log(f"Daemon starting with nickname={state.nickname} peer_id={state.identity.peer_id}.")
         await transport.start()
+        await geochat.start(state.watched_geohashes)
         await stop_event.wait()
         daemon_log("Daemon stopping.")
     finally:
@@ -759,6 +831,8 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
             cleanup_signal_handlers()
         if "transport" in locals():
             await transport.stop()
+        if "geochat" in locals():
+            await geochat.stop()
         if "daemon_server" in locals():
             daemon_server.close()
             await daemon_server.wait_closed()
@@ -934,10 +1008,15 @@ def run_daemon_status(_args: argparse.Namespace) -> int:
             print(f"known_peers:     {runtime_status.get('known_peers')}")
             print(f"peripheral_adv:  {runtime_status.get('peripheral_advertising')}")
             print(f"peripheral_subs: {runtime_status.get('peripheral_subscribers')}")
+            print(f"geo_relays:      {runtime_status.get('geohash_relay_subscriptions')}")
             addresses = runtime_status.get("peripheral_addresses")
             if isinstance(addresses, list):
                 visible_addresses = ", ".join(str(item) for item in addresses if str(item))
                 print(f"peripheral_addrs: {visible_addresses or '-'}")
+            geohashes = runtime_status.get("watched_geohashes")
+            if isinstance(geohashes, list):
+                visible_geohashes = ", ".join(f"#{item}" for item in geohashes if str(item))
+                print(f"geo_watches:     {visible_geohashes or '-'}")
             events = runtime_status.get("peripheral_recent_events")
             if isinstance(events, list):
                 for event in events:
@@ -961,15 +1040,19 @@ def _format_peripheral_event(event: dict[str, object]) -> str:
     return " ".join(parts)
 
 
+def _normalize_geo_target(raw: str) -> str:
+    try:
+        return normalize_geohash(raw)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
 def run_inbox(args: argparse.Namespace) -> int:
     runtime = RuntimePaths()
-    records = MessageStore(runtime.inbox_path).read_all(deduplicate=True)
     records = [
         row
-        for row in records
-        if row.get("direction") == "inbound"
-        and row.get("scope", "public") == "public"
-        and str(row.get("conversation_id") or _MESH_CONVERSATION_ID) == _MESH_CONVERSATION_ID
+        for row in _read_public_records(runtime)
+        if str(row.get("conversation_id") or _MESH_CONVERSATION_ID) == _MESH_CONVERSATION_ID
     ]
     if args.tail is not None:
         records = records[-args.tail :]
@@ -984,6 +1067,31 @@ def run_inbox(args: argparse.Namespace) -> int:
         sender = row["sender"]
         content = row["content"]
         print(f"{timestamp} #mesh <{sender}> {content}")
+    return 0
+
+
+def run_geo_inbox(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    try:
+        geohash = _normalize_geo_target(args.geohash)
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
+    records = [
+        row
+        for row in _read_public_records(runtime)
+        if str(row.get("conversation_id") or "") == geohash
+    ]
+    if args.tail is not None:
+        records = records[-args.tail :]
+    if args.json:
+        print(json.dumps(records, indent=2))
+        return 0
+    if not records:
+        print(f"no inbound messages recorded for #{geohash}")
+        return 0
+    for row in records:
+        print(f"{row['timestamp']} #{geohash} <{row['sender']}> {row['content']}")
     return 0
 
 
@@ -1040,6 +1148,83 @@ def run_send(args: argparse.Namespace) -> int:
         print(str(exc))
         return 1
     print("queued public message")
+    return 0
+
+
+def run_geo_send(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    try:
+        geohash = _normalize_geo_target(args.geohash)
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
+    try:
+        _send_daemon_command(
+            runtime,
+            {
+                "command": "geo_send",
+                "geohash": geohash,
+                "content": args.message,
+            },
+        )
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
+    print(f"queued geohash message to #{geohash}")
+    return 0
+
+
+def run_geo_watch_add(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    try:
+        geohash = _normalize_geo_target(args.geohash)
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
+    store = StateStore(runtime.state_path)
+    state = store.load()
+    watched = sorted(set(state.watched_geohashes) | {geohash})
+    state.watched_geohashes = watched
+    store.save(state)
+    try:
+        _send_daemon_command(runtime, {"command": "geo_watch_set", "geohashes": watched})
+    except RuntimeError:
+        pass
+    print(f"watching #{geohash}")
+    return 0
+
+
+def run_geo_watch_remove(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    try:
+        geohash = _normalize_geo_target(args.geohash)
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
+    store = StateStore(runtime.state_path)
+    state = store.load()
+    watched = [item for item in state.watched_geohashes if item != geohash]
+    state.watched_geohashes = watched
+    store.save(state)
+    try:
+        _send_daemon_command(runtime, {"command": "geo_watch_set", "geohashes": watched})
+    except RuntimeError:
+        pass
+    print(f"stopped watching #{geohash}")
+    return 0
+
+
+def run_geo_watch_list(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    state = StateStore(runtime.state_path).load()
+    if args.json:
+        print(json.dumps(state.watched_geohashes, indent=2))
+        return 0
+    if not state.watched_geohashes:
+        print("no geohash watches configured")
+        return 0
+    for geohash in state.watched_geohashes:
+        print(f"#{geohash}")
     return 0
 
 

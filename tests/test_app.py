@@ -296,6 +296,73 @@ def test_run_inbox_limits_public_view_to_mesh_conversation(tmp_path: Path, monke
     assert "other channel" not in captured.out
 
 
+def test_run_geo_inbox_filters_to_requested_geohash(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    store = MessageStore(runtime.inbox_path)
+    timestamp = datetime(2026, 6, 24, 0, 9, 44, tzinfo=timezone.utc)
+    store.append(
+        direction="inbound",
+        sender="bubbles#aa11",
+        content="geo hello",
+        timestamp=timestamp,
+        peer_id="a" * 64,
+        message_id="geo-1",
+        scope="public",
+        conversation_id="u4pruy",
+        message_kind="geohash_message",
+    )
+    store.append(
+        direction="inbound",
+        sender="bubbles#bb22",
+        content="other geo",
+        timestamp=timestamp,
+        peer_id="b" * 64,
+        message_id="geo-2",
+        scope="public",
+        conversation_id="u4pruv",
+        message_kind="geohash_message",
+    )
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+
+    exit_code = app.run_geo_inbox(argparse.Namespace(geohash="#u4pruy", json=False, tail=None))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "#u4pruy" in captured.out
+    assert "geo hello" in captured.out
+    assert "other geo" not in captured.out
+
+
+def test_run_geo_watch_add_persists_normalized_geohash(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+    monkeypatch.setattr(app, "_send_daemon_command", lambda *_args, **_kwargs: {"ok": True})
+
+    exit_code = app.run_geo_watch_add(argparse.Namespace(geohash="#U4PrUy"))
+
+    captured = capsys.readouterr()
+    state = app.StateStore(runtime.state_path).load()
+    assert exit_code == 0
+    assert state.watched_geohashes == ["u4pruy"]
+    assert "u4pruy" in captured.out
+
+
+def test_run_geo_watch_list_prints_configured_geohashes(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    state_store = app.StateStore(runtime.state_path)
+    state = state_store.load()
+    state.watched_geohashes = ["u4pruy", "u4xj"]
+    state_store.save(state)
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+
+    exit_code = app.run_geo_watch_list(argparse.Namespace(json=False))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "#u4pruy" in captured.out
+    assert "#u4xj" in captured.out
+
+
 def test_run_dm_inbox_summarizes_private_conversations(tmp_path: Path, monkeypatch, capsys) -> None:
     runtime = RuntimePaths(tmp_path)
     identity = Identity.generate()

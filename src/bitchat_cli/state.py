@@ -23,15 +23,24 @@ def default_state_path() -> Path:
 class AppState:
     nickname: str
     identity: Identity
+    nostr_device_seed_hex: str
+    watched_geohashes: list[str]
 
     @classmethod
     def create(cls) -> "AppState":
         suffix = secrets.token_hex(2)
-        return cls(nickname=f"anon-{suffix}", identity=Identity.generate())
+        return cls(
+            nickname=f"anon-{suffix}",
+            identity=Identity.generate(),
+            nostr_device_seed_hex=secrets.token_hex(32),
+            watched_geohashes=[],
+        )
 
     def to_json(self) -> dict[str, str]:
         data = {"nickname": self.nickname}
         data.update(self.identity.serialize())
+        data["nostr_device_seed"] = self.nostr_device_seed_hex
+        data["watched_geohashes"] = list(self.watched_geohashes)
         return data
 
 
@@ -45,13 +54,22 @@ class StateStore:
             self.save(state)
             return state
         data = json.loads(self.path.read_text())
-        return AppState(
+        state = AppState(
             nickname=data["nickname"],
             identity=Identity.from_hex(
                 noise_private_key_hex=data["noise_private_key"],
                 signing_private_key_hex=data["signing_private_key"],
             ),
+            nostr_device_seed_hex=str(data.get("nostr_device_seed") or secrets.token_hex(32)),
+            watched_geohashes=[
+                str(item)
+                for item in data.get("watched_geohashes", [])
+                if str(item)
+            ],
         )
+        if "nostr_device_seed" not in data or "watched_geohashes" not in data:
+            self.save(state)
+        return state
 
     def save(self, state: AppState) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,6 +103,10 @@ class RuntimePaths:
     @property
     def peers_path(self) -> Path:
         return self.root / "peers.json"
+
+    @property
+    def georelays_cache_path(self) -> Path:
+        return self.root / "georelays_cache.csv"
 
     @property
     def radio_pid_path(self) -> Path:

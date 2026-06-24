@@ -19,3 +19,22 @@ def test_mesh_inbox_parser_routes_to_public_inbox_handler() -> None:
 
     assert args.handler is app.run_inbox
     assert args.tail == 5
+
+
+def test_geo_send_parser_routes_to_geo_send_handler() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["geo", "send", "#u4pruy", "hello geo"])
+
+    assert args.handler is app.run_geo_send
+    assert args.geohash == "#u4pruy"
+    assert args.message == "hello geo"
+
+
+def test_geo_watch_add_parser_routes_to_geo_watch_add_handler() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["geo", "watch", "add", "u4pruy"])
+
+    assert args.handler is app.run_geo_watch_add
+    assert args.geohash == "u4pruy"

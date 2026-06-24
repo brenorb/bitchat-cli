@@ -13,6 +13,11 @@ from .app import (
     run_dm_inbox,
     run_dm_send,
     run_doctor,
+    run_geo_inbox,
+    run_geo_send,
+    run_geo_watch_add,
+    run_geo_watch_list,
+    run_geo_watch_remove,
     run_inbox,
     run_peers,
     run_send,
@@ -72,6 +77,35 @@ def build_parser() -> argparse.ArgumentParser:
     send = subparsers.add_parser("send", help="Send one public message through the background daemon")
     send.add_argument("message", help="Message body")
     send.set_defaults(handler=run_send)
+
+    geo = subparsers.add_parser("geo", help="Work with location geohash channels over Nostr")
+    geo_subparsers = geo.add_subparsers(dest="geo_command", required=True)
+
+    geo_send = geo_subparsers.add_parser("send", help="Send one public message to a geohash channel")
+    geo_send.add_argument("geohash", help="Target geohash, with or without leading #")
+    geo_send.add_argument("message", help="Message body")
+    geo_send.set_defaults(handler=run_geo_send)
+
+    geo_inbox = geo_subparsers.add_parser("inbox", help="Show recorded inbound messages for one geohash channel")
+    geo_inbox.add_argument("geohash", help="Target geohash, with or without leading #")
+    geo_inbox.add_argument("--json", action="store_true", help="Output JSON")
+    geo_inbox.add_argument("--tail", type=int, help="Show only the last N inbound messages")
+    geo_inbox.set_defaults(handler=run_geo_inbox)
+
+    geo_watch = geo_subparsers.add_parser("watch", help="Manage background geohash subscriptions")
+    geo_watch_subparsers = geo_watch.add_subparsers(dest="geo_watch_command", required=True)
+
+    geo_watch_add = geo_watch_subparsers.add_parser("add", help="Subscribe the daemon to a geohash channel")
+    geo_watch_add.add_argument("geohash", help="Target geohash, with or without leading #")
+    geo_watch_add.set_defaults(handler=run_geo_watch_add)
+
+    geo_watch_remove = geo_watch_subparsers.add_parser("remove", help="Unsubscribe the daemon from a geohash channel")
+    geo_watch_remove.add_argument("geohash", help="Target geohash, with or without leading #")
+    geo_watch_remove.set_defaults(handler=run_geo_watch_remove)
+
+    geo_watch_list = geo_watch_subparsers.add_parser("list", help="Show configured geohash subscriptions")
+    geo_watch_list.add_argument("--json", action="store_true", help="Output JSON")
+    geo_watch_list.set_defaults(handler=run_geo_watch_list)
 
     peers = subparsers.add_parser("peers", help="Show known peers recorded by the CLI")
     peers.add_argument("--json", action="store_true", help="Output JSON")

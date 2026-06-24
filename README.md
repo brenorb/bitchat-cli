@@ -5,6 +5,7 @@
 Current scope:
 
 - `#mesh` as the CLI's explicit public conversation surface
+- Location geohash channels over Nostr, with deterministic per-geohash identities
 - Real BitChat mainnet BLE UUIDs
 - Official announce packet format
 - Announce packets include current direct-neighbor hints from live connected peers
@@ -22,9 +23,9 @@ Current scope:
 
 Still not implemented:
 
-- Private channels beyond the mesh public conversation
 - File transfer
-- Nostr geohash chat
+- Presence counts and the full location-channel sheet model from the app UI
+- Nostr private messaging outside the Bluetooth mesh path
 
 ## Quick start
 
@@ -55,6 +56,9 @@ uv run bitchat daemon start --nickname breno
 uv run bitchat daemon status
 uv run bitchat send "hello from daemon"
 uv run bitchat mesh send "hello #mesh"
+uv run bitchat geo watch add u4pruy
+uv run bitchat geo send u4pruy "hello #u4pruy"
+uv run bitchat geo inbox u4pruy --tail 20
 uv run bitchat peers
 uv run bitchat inbox --tail 20
 uv run bitchat mesh inbox --tail 20
@@ -94,8 +98,18 @@ Behavior notes:
   are currently attached. It also shows a short bounded history of recent
   peripheral subscribe/unsubscribe/write events to make phone-to-daemon testing
   debuggable without catching the exact moment live.
+- `geo watch add/remove/list` manages the geohash channels the daemon keeps
+  subscribed in the background, so location-channel messages can arrive while
+  no interactive client is open.
+- `geo send <geohash> ...` publishes a real kind `20000` geohash-scoped Nostr
+  event, signed with the same deterministic HMAC-derived per-geohash identity
+  shape the macOS app uses.
+- The daemon caches the official `permissionlesstech/georelays` CSV locally and
+  picks the closest relays to the target geohash center, matching the app's
+  geohash relay selection model at a smaller implementation scope.
 - `inbox` is the `#mesh` view for the BLE public conversation, and `mesh send`
   / `mesh inbox` expose that same scope explicitly in the CLI.
+- `geo inbox <geohash>` is the inbound view for one location channel.
 - The macOS peripheral endpoint now exposes the same BLE characteristic surface
   the official app does for inbound writes: notify, read, write, and
   write-without-response.
@@ -138,4 +152,4 @@ Behavior notes:
 
 ## Notes
 
-This implementation is intentionally narrow. It aims to interoperate with the official apps for signed public chat without claiming full protocol coverage.
+This implementation is intentionally narrow. It aims to interoperate with the official apps for signed public chat across Bluetooth mesh and geohash/Nostr channels without claiming full protocol coverage.

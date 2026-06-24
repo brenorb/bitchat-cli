@@ -6,7 +6,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "bleak>=0.22.3",
+  "coincurve>=21.0.0",
   "cryptography>=45.0.0",
+  "websockets>=15.0.1",
 ]
 
 [project.scripts]

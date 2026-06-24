@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bitchat_cli.crypto import Identity
-from bitchat_cli.state import ActiveSessionLease, MessageStore, PeerStore, RuntimePaths, pid_is_running
+from bitchat_cli.state import ActiveSessionLease, MessageStore, PeerStore, RuntimePaths, StateStore, pid_is_running
 
 
 def test_runtime_paths_are_stable(tmp_path: Path) -> None:
@@ -15,6 +15,7 @@ def test_runtime_paths_are_stable(tmp_path: Path) -> None:
     assert paths.inbox_path == tmp_path / "messages.jsonl"
     assert paths.peers_path == tmp_path / "peers.json"
     assert paths.daemon_socket_path == tmp_path / "daemon.sock"
+    assert paths.georelays_cache_path == tmp_path / "georelays_cache.csv"
 
 
 def test_message_store_round_trip(tmp_path: Path) -> None:
@@ -235,3 +236,25 @@ def test_pid_is_running_for_current_process() -> None:
     import os
 
     assert pid_is_running(os.getpid()) is True
+
+
+def test_state_store_backfills_nostr_seed_and_geo_watches_for_legacy_state(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    identity = Identity.generate()
+    path.write_text(
+        "{\n"
+        f'  "nickname": "legacy",\n'
+        f'  "noise_private_key": "{identity.serialize()["noise_private_key"]}",\n'
+        f'  "signing_private_key": "{identity.serialize()["signing_private_key"]}"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+
+    store = StateStore(path)
+    loaded = store.load()
+    reloaded = store.load()
+
+    assert loaded.nickname == "legacy"
+    assert len(loaded.nostr_device_seed_hex) == 64
+    assert loaded.watched_geohashes == []
+    assert reloaded.nostr_device_seed_hex == loaded.nostr_device_seed_hex
