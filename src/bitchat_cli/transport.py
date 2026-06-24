@@ -15,6 +15,7 @@ from .crypto import Identity, peer_id_from_noise_public_key
 from .dedupe import ExpiringSet, packet_cache_key
 from .fragments import FragmentAssemblyBuffer, fragment_packet_sequence
 from .noise import NoiseError, NoiseSession
+from .peripheral import NullPeripheralEndpoint, PeripheralEndpoint
 from .protocol import (
     Announcement,
     NoisePayload,
@@ -85,6 +86,7 @@ class BLEChatTransport:
         receipt_log: ReceiptLogger | None = None,
         scan_interval: float = 5.0,
         background_mode: bool = False,
+        peripheral_endpoint: PeripheralEndpoint | None = None,
     ) -> None:
         self.identity = identity
         self.nickname = nickname
@@ -95,6 +97,7 @@ class BLEChatTransport:
         self.receipt_log = receipt_log
         self.scan_interval = scan_interval
         self.background_mode = background_mode
+        self.peripheral_endpoint = peripheral_endpoint or NullPeripheralEndpoint()
         self.clients: dict[str, BleakClient] = {}
         self.connecting: set[str] = set()
         self.known_peers: dict[str, PeerRecord] = {}
@@ -125,6 +128,7 @@ class BLEChatTransport:
 
     async def start(self) -> None:
         self._stop_event.clear()
+        self.peripheral_endpoint.start()
         self._connect_queue = asyncio.Queue(maxsize=_MAX_CONNECT_QUEUE_SIZE)
         self._connect_workers = [
             asyncio.create_task(self._connect_worker())
@@ -187,6 +191,7 @@ class BLEChatTransport:
                     await client.disconnect()
             except Exception:
                 pass
+        self.peripheral_endpoint.stop()
 
     def list_peers(self) -> list[PeerRecord]:
         return sorted(self.known_peers.values(), key=lambda peer: (peer.nickname.lower(), peer.peer_id))
@@ -399,6 +404,14 @@ class BLEChatTransport:
         except asyncio.QueueFull:
             self.system_log(f"Dropped inbound packet from {address}: notification queue is full.")
 
+    async def _handle_peripheral_subscribe(self, address: str) -> None:
+        packet = self._make_announce_packet()
+        self._remember_sync_packet(packet)
+        self.peripheral_endpoint.send(packet.encode(padding=False), target_addresses={address})
+
+    def _handle_peripheral_unsubscribe(self, address: str) -> None:
+        self._remove_address_from_peers(address)
+
     def _enqueue_connect_candidate(self, device) -> None:
         address = getattr(device, "address", None)
         if not address:
@@ -575,7 +588,9 @@ class BLEChatTransport:
         direct_neighbors = [
             bytes.fromhex(peer.peer_id)
             for peer in sorted(self.known_peers.values(), key=lambda item: item.peer_id)[:10]
-            if peer.active_address is not None and peer.active_address in self.clients
+            if peer.active_address is not None and (
+                peer.active_address in self.clients or peer.active_address.startswith("peripheral:")
+            )
         ]
         return make_announce_packet(
             self.identity,
@@ -999,6 +1014,7 @@ class BLEChatTransport:
         if peer is None:
             self.system_log(f"Unknown peer_id for direct packet: {peer_id}")
             return False
+        data = packet.encode(padding=False)
         target_address = None
         if peer.active_address is not None and peer.active_address in self.clients:
             target_address = peer.active_address
@@ -1008,6 +1024,20 @@ class BLEChatTransport:
                     target_address = address
                     break
         if target_address is None:
+            peripheral_targets = {
+                address
+                for address in peer.addresses
+                if address.startswith("peripheral:")
+            }
+            if peer.active_address is not None and peer.active_address.startswith("peripheral:"):
+                peripheral_targets.add(peer.active_address)
+            if peripheral_targets:
+                self.peripheral_endpoint.send(data, target_addresses=peripheral_targets)
+                self._mark_mesh_activity()
+                if packet.signature is not None:
+                    self._recent_own_signatures.append(packet.signature.hex())
+                return True
+        if target_address is None:
             self.system_log(f"No connected BitChat link to {peer.nickname} ({peer.peer_id}).")
             return False
         await self._write_packet(self.clients[target_address], packet)
@@ -1015,6 +1045,11 @@ class BLEChatTransport:
 
     async def _broadcast_packet(self, packet: Packet, *, exclude_addresses: set[str] | None = None) -> None:
         excluded = exclude_addresses or set()
+        data = packet.encode(padding=False)
+        self.peripheral_endpoint.send(
+            data,
+            exclude_addresses={address for address in excluded if address.startswith("peripheral:")},
+        )
         clients = [client for address, client in self.clients.items() if address not in excluded]
         if not clients:
             if not excluded:

@@ -10,6 +10,7 @@ Current scope:
 - Official packet signing and peer ID derivation
 - Public broadcast chat with persistent local identity
 - Central-role BLE transport using `bleak`
+- macOS BLE peripheral advertising and subscriber writes for app-to-CLI reachability
 - Inbound fragment reassembly and outbound packet fragmentation for oversized BLE payloads
 - Direct BLE private messaging over Noise XX with lazy handshake
 - Official Noise XX session primitives validated against the macOS app's test vectors
@@ -20,7 +21,6 @@ Current scope:
 
 Still not implemented:
 
-- BLE peripheral advertising
 - File transfer
 - Nostr geohash chat
 

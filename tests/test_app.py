@@ -1,22 +1,69 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
 from bitchat_cli import app
 from bitchat_cli.crypto import Identity
+from bitchat_cli.peripheral import NullPeripheralEndpoint
 from bitchat_cli.state import MessageStore, PeerStore, RuntimePaths
 
 
 def test_doctor_payload_reports_mesh_relay_support(tmp_path: Path, monkeypatch) -> None:
     runtime = RuntimePaths(tmp_path)
     monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+    monkeypatch.setattr(app, "peripheral_supported", lambda: False)
 
     payload = app.doctor_payload(app.StateStore(runtime.state_path))
 
     assert payload["scope"]["mesh_relay"] is True
     assert payload["scope"]["local_sync"] is True
+    assert payload["scope"]["ble_peripheral"] is False
+
+
+class FakePeripheralEndpoint(NullPeripheralEndpoint):
+    def __init__(self) -> None:
+        self.sent: list[bytes] = []
+
+    def send(
+        self,
+        data: bytes,
+        *,
+        target_addresses: set[str] | None = None,
+        exclude_addresses: set[str] | None = None,
+    ) -> None:
+        self.sent.append(data)
+
+
+def test_build_transport_attaches_platform_peripheral_endpoint(monkeypatch) -> None:
+    endpoint = FakePeripheralEndpoint()
+    calls: list[tuple[str, object]] = []
+
+    def fake_create_peripheral_endpoint(**kwargs):
+        calls.append(("create", kwargs["system_log"]))
+        return endpoint
+
+    monkeypatch.setattr(app, "create_peripheral_endpoint", fake_create_peripheral_endpoint)
+
+    transport = app._build_transport(
+        nickname="local",
+        identity=Identity.generate(),
+        scan_interval=5.0,
+        system_log=lambda _message: None,
+        message_log=lambda *_args: None,
+        peer_log=None,
+        private_message_log=None,
+        receipt_log=None,
+        background_mode=False,
+    )
+
+    asyncio.run(transport.send_public_message("hello app"))
+
+    assert calls != []
+    assert transport.peripheral_endpoint is endpoint
+    assert endpoint.sent != []
 
 
 def test_run_peers_lists_persisted_peers(tmp_path: Path, monkeypatch, capsys) -> None:

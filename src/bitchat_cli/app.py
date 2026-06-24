@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .constants import CHARACTERISTIC_UUID, SERVICE_UUID
+from .peripheral import create_peripheral_endpoint, peripheral_supported
 from .state import ActiveSessionLease, MessageStore, PeerStore, RuntimePaths, StateStore, pid_is_running
 from .transport import BLEChatTransport
 
@@ -144,7 +145,7 @@ def doctor_payload(store: StateStore) -> dict[str, object]:
             "private_noise_chat": True,
             "mesh_relay": True,
             "local_sync": True,
-            "ble_peripheral": False,
+            "ble_peripheral": peripheral_supported(),
             "nostr_geochat": False,
             "fragment_reassembly": True,
         },
@@ -189,7 +190,7 @@ def _build_transport(
     receipt_log,
     background_mode: bool,
 ) -> BLEChatTransport:
-    return BLEChatTransport(
+    transport = BLEChatTransport(
         identity=identity,
         nickname=nickname,
         system_log=system_log,
@@ -200,6 +201,24 @@ def _build_transport(
         scan_interval=scan_interval,
         background_mode=background_mode,
     )
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    def handle_subscribe(address: str) -> None:
+        asyncio.create_task(transport._handle_peripheral_subscribe(address))
+
+    transport.peripheral_endpoint = create_peripheral_endpoint(
+        service_uuid=SERVICE_UUID,
+        characteristic_uuid=CHARACTERISTIC_UUID,
+        system_log=system_log,
+        on_write=transport._enqueue_notification,
+        on_subscribe=handle_subscribe,
+        on_unsubscribe=transport._handle_peripheral_unsubscribe,
+        loop=loop,
+    )
+    return transport
 
 
 async def run_chat(args: argparse.Namespace) -> int:

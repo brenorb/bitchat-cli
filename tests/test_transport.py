@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import bitchat_cli.transport as transport_module
 from bitchat_cli.constants import MessageType
 from bitchat_cli.crypto import Identity
+from bitchat_cli.peripheral import NullPeripheralEndpoint
 from bitchat_cli.protocol import Announcement, Packet, make_announce_packet, make_noise_handshake_packet, make_public_message_packet
 from bitchat_cli.sync import GCSFilter, RequestSyncPacket, SyncTypeFlags, packet_sync_id
 from bitchat_cli.transport import BLEChatTransport, PeerRecord
@@ -25,12 +26,35 @@ class FakeDevice:
     address: str
 
 
+class FakePeripheralEndpoint(NullPeripheralEndpoint):
+    def __init__(self) -> None:
+        self.started = False
+        self.stopped = False
+        self.sent: list[tuple[set[str] | None, set[str], bytes]] = []
+
+    def start(self) -> None:
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def send(
+        self,
+        data: bytes,
+        *,
+        target_addresses: set[str] | None = None,
+        exclude_addresses: set[str] | None = None,
+    ) -> None:
+        self.sent.append((target_addresses, exclude_addresses or set(), data))
+
+
 def _make_transport(
     *,
     identity: Identity,
     nickname: str,
     private_messages: list[tuple[str, str, datetime, str, str]],
     receipts: list[tuple[str, str, str, datetime]],
+    peripheral_endpoint: NullPeripheralEndpoint | None = None,
 ) -> BLEChatTransport:
     return BLEChatTransport(
         identity=identity,
@@ -43,6 +67,7 @@ def _make_transport(
         receipt_log=lambda peer_id, receipt_type, message_id, timestamp: receipts.append(
             (peer_id, receipt_type, message_id, timestamp)
         ),
+        peripheral_endpoint=peripheral_endpoint,
     )
 
 
@@ -556,6 +581,117 @@ def test_fragment_relays_before_full_reassembly() -> None:
     asyncio.run(case())
 
 
+def test_transport_start_stop_controls_peripheral_endpoint() -> None:
+    async def case() -> None:
+        endpoint = FakePeripheralEndpoint()
+        transport = _make_transport(
+            identity=Identity.generate(),
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+            peripheral_endpoint=endpoint,
+        )
+
+        await transport.start()
+        await transport.stop()
+
+        assert endpoint.started is True
+        assert endpoint.stopped is True
+
+    asyncio.run(case())
+
+
+def test_public_broadcast_reaches_peripheral_subscribers() -> None:
+    async def case() -> None:
+        endpoint = FakePeripheralEndpoint()
+        local_identity = Identity.generate()
+        transport = _make_transport(
+            identity=local_identity,
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+            peripheral_endpoint=endpoint,
+        )
+
+        await transport.send_public_message("hello app")
+
+        assert len(endpoint.sent) == 1
+        target_addresses, exclude_addresses, raw = endpoint.sent[0]
+        assert target_addresses is None
+        assert exclude_addresses == set()
+        decoded = Packet.decode(raw)
+        assert decoded.packet_type == MessageType.MESSAGE
+        assert decoded.payload == b"hello app"
+
+    asyncio.run(case())
+
+
+def test_direct_send_to_peripheral_peer_targets_matching_subscriber() -> None:
+    async def case() -> None:
+        endpoint = FakePeripheralEndpoint()
+        local_identity = Identity.generate()
+        alice_identity = Identity.generate()
+        transport = _make_transport(
+            identity=local_identity,
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+            peripheral_endpoint=endpoint,
+        )
+        _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="peripheral:A1")
+        transport.known_peers[alice_identity.peer_id].active_address = "peripheral:A1"
+
+        packet = make_noise_handshake_packet(local_identity, alice_identity.peer_id, b"hs1")
+
+        assert await transport._send_packet_to_peer(alice_identity.peer_id, packet) is True
+        assert len(endpoint.sent) == 1
+        target_addresses, exclude_addresses, raw = endpoint.sent[0]
+        assert target_addresses == {"peripheral:A1"}
+        assert exclude_addresses == set()
+        assert Packet.decode(raw).packet_type == MessageType.NOISE_HANDSHAKE
+
+    asyncio.run(case())
+
+
+def test_peripheral_subscribe_sends_targeted_announce() -> None:
+    async def case() -> None:
+        endpoint = FakePeripheralEndpoint()
+        transport = _make_transport(
+            identity=Identity.generate(),
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+            peripheral_endpoint=endpoint,
+        )
+
+        await transport._handle_peripheral_subscribe("peripheral:A1")
+
+        assert len(endpoint.sent) == 1
+        target_addresses, exclude_addresses, raw = endpoint.sent[0]
+        assert target_addresses == {"peripheral:A1"}
+        assert exclude_addresses == set()
+        assert Packet.decode(raw).packet_type == MessageType.ANNOUNCE
+
+    asyncio.run(case())
+
+
+def test_peripheral_unsubscribe_clears_active_address() -> None:
+    transport = _make_transport(
+        identity=Identity.generate(),
+        nickname="local",
+        private_messages=[],
+        receipts=[],
+    )
+    alice_identity = Identity.generate()
+    _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="peripheral:A1")
+    transport.known_peers[alice_identity.peer_id].active_address = "peripheral:A1"
+
+    transport._handle_peripheral_unsubscribe("peripheral:A1")
+
+    assert "peripheral:A1" not in transport.known_peers[alice_identity.peer_id].addresses
+    assert transport.known_peers[alice_identity.peer_id].active_address is None
+
+
 def test_outbound_fragment_write_populates_fragment_sync_cache() -> None:
     async def case() -> None:
         local_identity = Identity.generate()
@@ -882,6 +1018,23 @@ def test_announce_packet_includes_connected_direct_neighbors() -> None:
         bytes.fromhex(alice.peer_id),
         bytes.fromhex(bob.peer_id),
     }
+
+
+def test_announce_packet_includes_peripheral_direct_neighbors() -> None:
+    transport = _make_transport(
+        identity=Identity.generate(),
+        nickname="local",
+        private_messages=[],
+        receipts=[],
+    )
+    alice = Identity.generate()
+    _register_known_peer(transport, peer_identity=alice, nickname="alice", address="peripheral:A1")
+    transport.known_peers[alice.peer_id].active_address = "peripheral:A1"
+
+    packet = transport._make_announce_packet()
+    announcement = Announcement.decode(packet.payload)
+
+    assert announcement.direct_neighbors == [bytes.fromhex(alice.peer_id)]
 
 
 def test_new_peer_announce_triggers_public_request_sync() -> None:
