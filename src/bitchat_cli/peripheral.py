@@ -170,6 +170,20 @@ def _create_peripheral_manager(core_bluetooth, delegate, queue):
     )
 
 
+def _characteristic_spec(core_bluetooth) -> tuple[int, int]:
+    properties = (
+        core_bluetooth.CBCharacteristicPropertyNotify
+        | core_bluetooth.CBCharacteristicPropertyRead
+        | core_bluetooth.CBCharacteristicPropertyWrite
+        | core_bluetooth.CBCharacteristicPropertyWriteWithoutResponse
+    )
+    permissions = (
+        core_bluetooth.CBAttributePermissionsReadable
+        | core_bluetooth.CBAttributePermissionsWriteable
+    )
+    return properties, permissions
+
+
 class MacOSPeripheralEndpoint:
     def __init__(
         self,
@@ -272,11 +286,7 @@ class MacOSPeripheralEndpoint:
     def _install_service(self) -> None:
         service_uuid = self._CoreBluetooth.CBUUID.UUIDWithString_(self._service_uuid)
         characteristic_uuid = self._CoreBluetooth.CBUUID.UUIDWithString_(self._characteristic_uuid)
-        properties = (
-            self._CoreBluetooth.CBCharacteristicPropertyNotify
-            | self._CoreBluetooth.CBCharacteristicPropertyWriteWithoutResponse
-        )
-        permissions = self._CoreBluetooth.CBAttributePermissionsWriteable
+        properties, permissions = _characteristic_spec(self._CoreBluetooth)
         characteristic = self._CoreBluetooth.CBMutableCharacteristic.alloc().initWithType_properties_value_permissions_(
             characteristic_uuid,
             properties,

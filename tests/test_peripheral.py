@@ -49,6 +49,29 @@ def test_create_peripheral_manager_passes_dispatch_queue() -> None:
     }
 
 
+def test_characteristic_spec_matches_official_app_surface() -> None:
+    class FakeCoreBluetooth:
+        CBCharacteristicPropertyNotify = 0x01
+        CBCharacteristicPropertyRead = 0x02
+        CBCharacteristicPropertyWrite = 0x04
+        CBCharacteristicPropertyWriteWithoutResponse = 0x08
+        CBAttributePermissionsReadable = 0x10
+        CBAttributePermissionsWriteable = 0x20
+
+    properties, permissions = peripheral_module._characteristic_spec(FakeCoreBluetooth)
+
+    assert properties == (
+        FakeCoreBluetooth.CBCharacteristicPropertyNotify
+        | FakeCoreBluetooth.CBCharacteristicPropertyRead
+        | FakeCoreBluetooth.CBCharacteristicPropertyWrite
+        | FakeCoreBluetooth.CBCharacteristicPropertyWriteWithoutResponse
+    )
+    assert permissions == (
+        FakeCoreBluetooth.CBAttributePermissionsReadable
+        | FakeCoreBluetooth.CBAttributePermissionsWriteable
+    )
+
+
 def test_null_peripheral_endpoint_has_no_subscriber_addresses() -> None:
     endpoint = peripheral_module.NullPeripheralEndpoint()
 

@@ -88,6 +88,9 @@ Behavior notes:
   socket is available, including whether peripheral advertising is active, how
   many peripheral subscribers are attached, and which subscriber BLE addresses
   are currently attached.
+- The macOS peripheral endpoint now exposes the same BLE characteristic surface
+  the official app does for inbound writes: notify, read, write, and
+  write-without-response.
 - `send` queues a public channel message through the running daemon, so you can
   test outbound delivery without stopping the background listener to open
   interactive `chat`.
