@@ -90,7 +90,7 @@ def test_message_store_persists_scope_and_conversation_metadata(tmp_path: Path) 
     assert rows[0]["delivery_state"] == "delivered"
 
 
-def test_peer_store_upserts_and_merges_addresses(tmp_path: Path) -> None:
+def test_peer_store_upserts_replaces_addresses_on_newer_observation(tmp_path: Path) -> None:
     store = PeerStore(tmp_path / "peers.json")
     identity = Identity.generate()
     first_seen = datetime(2026, 6, 24, 0, 0, 0, tzinfo=timezone.utc)
@@ -120,7 +120,37 @@ def test_peer_store_upserts_and_merges_addresses(tmp_path: Path) -> None:
     assert rows[0]["nickname"] == "bubbles-renamed"
     assert rows[0]["noise_public_key"] == identity.noise_public_key.hex()
     assert rows[0]["signing_public_key"] == identity.signing_public_key.hex()
-    assert rows[0]["addresses"] == ["A1", "B2"]
+    assert rows[0]["addresses"] == ["B2"]
+    assert rows[0]["last_seen"] == latest_seen.isoformat()
+
+
+def test_peer_store_preserves_newer_addresses_when_older_observation_arrives(tmp_path: Path) -> None:
+    store = PeerStore(tmp_path / "peers.json")
+    identity = Identity.generate()
+    latest_seen = datetime(2026, 6, 24, 0, 5, 0, tzinfo=timezone.utc)
+    older_seen = datetime(2026, 6, 24, 0, 0, 0, tzinfo=timezone.utc)
+
+    store.upsert(
+        peer_id=identity.peer_id,
+        nickname="fresh",
+        noise_public_key=identity.noise_public_key,
+        signing_public_key=identity.signing_public_key,
+        addresses={"B2"},
+        last_seen=latest_seen,
+    )
+    store.upsert(
+        peer_id=identity.peer_id,
+        nickname="stale",
+        noise_public_key=identity.noise_public_key,
+        signing_public_key=identity.signing_public_key,
+        addresses={"A1"},
+        last_seen=older_seen,
+    )
+
+    rows = store.read_all()
+
+    assert rows[0]["nickname"] == "fresh"
+    assert rows[0]["addresses"] == ["B2"]
     assert rows[0]["last_seen"] == latest_seen.isoformat()
 
 

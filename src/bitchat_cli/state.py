@@ -241,21 +241,20 @@ class PeerStore:
             noise_public_key_to_store = noise_public_key.hex()
             signing_public_key_to_store = signing_public_key.hex()
             last_seen_to_store = last_seen.astimezone(timezone.utc).isoformat()
+            addresses_to_store = sorted(addresses)
         else:
             nickname_to_store = existing["nickname"]
             noise_public_key_to_store = existing["noise_public_key"]
             signing_public_key_to_store = existing["signing_public_key"]
             last_seen_to_store = existing["last_seen"]
-
-        merged_addresses = set(existing.get("addresses", [])) if existing is not None else set()
-        merged_addresses.update(addresses)
+            addresses_to_store = list(existing.get("addresses", []))
 
         peers[peer_id] = {
             "peer_id": peer_id,
             "nickname": nickname_to_store,
             "noise_public_key": noise_public_key_to_store,
             "signing_public_key": signing_public_key_to_store,
-            "addresses": sorted(merged_addresses),
+            "addresses": addresses_to_store,
             "last_seen": last_seen_to_store,
         }
         self._write_all(list(peers.values()))

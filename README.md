@@ -62,7 +62,8 @@ Daemon artifacts live under `~/.config/bitchat-cli/`:
 - `daemon.log` - background listener log
 - `daemon.sock` - local control socket for `dm send` and read-receipt commands
 - `messages.jsonl` - recorded message history
-- `peers.json` - known peers learned from signed announce packets
+- `peers.json` - known peers learned from signed announce packets, keeping the
+  latest observed address set per peer instead of a growing historical archive
 - `daemon.pid` - running daemon pid
 - `radio.pid` - active BLE session guard
 
