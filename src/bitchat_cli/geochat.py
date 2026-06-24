@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import math
+import random
 import secrets
 import time
 from dataclasses import dataclass
@@ -27,6 +28,9 @@ _EVENT_KIND_GEOHASH_MESSAGE = 20000
 _EVENT_KIND_GEOHASH_PRESENCE = 20001
 _GEORELAYS_URL = "https://raw.githubusercontent.com/permissionlesstech/georelays/refs/heads/main/nostr_relays.csv"
 _DEFAULT_POW_MAX_ITERATIONS = 2_000_000
+_DEFAULT_PRESENCE_INTERVAL_RANGE_SECONDS = (40.0, 80.0)
+_DEFAULT_PRESENCE_STEP_DELAY_RANGE_SECONDS = (1.0, 10.0)
+_DEFAULT_PRESENCE_IDLE_SECONDS = 10.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -111,6 +115,27 @@ def create_ephemeral_geohash_event(
         raise ValueError("pow difficulty must be non-negative")
     if pow_difficulty > 0:
         event = mine_event_pow(event, pow_difficulty)
+    digest = event_digest(event)
+    signature = PrivateKey(bytes.fromhex(identity.private_key_hex)).sign_schnorr(digest).hex()
+    event["id"] = digest.hex()
+    event["sig"] = signature
+    return event
+
+
+def create_geohash_presence_event(
+    *,
+    geohash: str,
+    identity: NostrIdentity,
+    created_at: int | None = None,
+) -> dict[str, object]:
+    normalized = normalize_geohash(geohash)
+    event = {
+        "pubkey": identity.public_key_hex,
+        "created_at": int(created_at if created_at is not None else time.time()),
+        "kind": _EVENT_KIND_GEOHASH_PRESENCE,
+        "tags": [["g", normalized]],
+        "content": "",
+    }
     digest = event_digest(event)
     signature = PrivateKey(bytes.fromhex(identity.private_key_hex)).sign_schnorr(digest).hex()
     event["id"] = digest.hex()
@@ -317,26 +342,39 @@ class GeoChatDaemon:
         nickname: str,
         on_message: Callable[[dict[str, object]], None],
         system_log: Callable[[str], None] | None = None,
+        presence_interval_range_seconds: tuple[float, float] = _DEFAULT_PRESENCE_INTERVAL_RANGE_SECONDS,
+        presence_step_delay_range_seconds: tuple[float, float] = _DEFAULT_PRESENCE_STEP_DELAY_RANGE_SECONDS,
+        presence_idle_seconds: float = _DEFAULT_PRESENCE_IDLE_SECONDS,
     ) -> None:
         self.relay_cache_path = relay_cache_path
         self.seed = bytes.fromhex(seed_hex)
         self.nickname = nickname
         self.on_message = on_message
         self.system_log = system_log or (lambda _message: None)
+        self.presence_interval_range_seconds = presence_interval_range_seconds
+        self.presence_step_delay_range_seconds = presence_step_delay_range_seconds
+        self.presence_idle_seconds = presence_idle_seconds
         self._watch_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._watched_geohashes: list[str] = []
         self._relay_entries: list[GeoRelayEntry] = []
         self._recent_event_ids = ExpiringSet(ttl_seconds=600.0, max_entries=10_000)
+        self._presence_task: asyncio.Task[None] | None = None
 
     async def start(self, geohashes: list[str]) -> None:
         if geohashes:
             self._relay_entries = load_relay_entries(self.relay_cache_path)
+        if self._presence_task is None:
+            self._presence_task = asyncio.create_task(self._presence_loop())
         await self.set_watches(geohashes)
 
     async def stop(self) -> None:
         tasks = list(self._watch_tasks.values())
         self._watch_tasks.clear()
         self._watched_geohashes = []
+        if self._presence_task is not None:
+            self._presence_task.cancel()
+            tasks.append(self._presence_task)
+            self._presence_task = None
         for task in tasks:
             task.cancel()
         if tasks:
@@ -381,6 +419,18 @@ class GeoChatDaemon:
         await asyncio.gather(*(self._publish_to_relay(relay, event) for relay in relays))
         return event
 
+    async def publish_presence(self, geohash: str) -> dict[str, object]:
+        normalized = normalize_geohash(geohash)
+        if not self._relay_entries:
+            self._relay_entries = load_relay_entries(self.relay_cache_path)
+        identity = derive_nostr_identity(self.seed, normalized)
+        event = create_geohash_presence_event(geohash=normalized, identity=identity)
+        relays = closest_relays(self._relay_entries, normalized)
+        if not relays:
+            raise RuntimeError(f"no relays available for #{normalized}")
+        await asyncio.gather(*(self._publish_to_relay(relay, event) for relay in relays))
+        return event
+
     def runtime_status(self) -> dict[str, object]:
         return {
             "watched_geohashes": list(self._watched_geohashes),
@@ -413,6 +463,35 @@ class GeoChatDaemon:
             except Exception as exc:
                 self.system_log(f"geo relay error {relay_url} #{geohash}: {exc}")
             await asyncio.sleep(2.0)
+
+    async def _presence_loop(self) -> None:
+        while True:
+            try:
+                target_geohashes = [item for item in self._watched_geohashes if len(item) <= 5]
+                if not target_geohashes:
+                    await asyncio.sleep(self.presence_idle_seconds)
+                    continue
+                loop_interval = self._sample_range(self.presence_interval_range_seconds)
+                time_spent = 0.0
+                for geohash in target_geohashes:
+                    step_delay = self._sample_range(self.presence_step_delay_range_seconds)
+                    if step_delay > 0:
+                        await asyncio.sleep(step_delay)
+                        time_spent += step_delay
+                    try:
+                        await self.publish_presence(geohash)
+                    except Exception as exc:
+                        self.system_log(f"geo presence error #{geohash}: {exc}")
+                remaining = loop_interval - time_spent
+                await asyncio.sleep(remaining if remaining > 0 else self.presence_idle_seconds)
+            except asyncio.CancelledError:
+                return
+
+    def _sample_range(self, bounds: tuple[float, float]) -> float:
+        low, high = bounds
+        if high <= low:
+            return max(0.0, low)
+        return random.uniform(low, high)
 
     def _handle_relay_message(self, geohash: str, raw_message: str) -> None:
         try:

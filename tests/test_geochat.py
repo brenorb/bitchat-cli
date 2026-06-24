@@ -51,6 +51,20 @@ def test_create_ephemeral_geohash_event_round_trips_signature() -> None:
     assert geochat.verify_event_signature(event) is True
 
 
+def test_create_geohash_presence_event_round_trips_signature() -> None:
+    identity = geochat.derive_nostr_identity(bytes.fromhex("24" * 32), "u4pru")
+
+    event = geochat.create_geohash_presence_event(
+        geohash="u4pru",
+        identity=identity,
+    )
+
+    assert event["kind"] == 20001
+    assert event["content"] == ""
+    assert ["g", "u4pru"] in event["tags"]
+    assert geochat.verify_event_signature(event) is True
+
+
 def test_create_ephemeral_geohash_event_can_mine_pow(monkeypatch) -> None:
     identity = geochat.derive_nostr_identity(bytes.fromhex("77" * 32), "u4pruy")
     monkeypatch.setattr(geochat.secrets, "randbelow", lambda _limit: 0)
@@ -186,3 +200,53 @@ def test_geochat_daemon_deduplicates_same_event_from_multiple_relays() -> None:
     daemon._handle_relay_message("u4pruy", payload)
 
     assert [item["id"] for item in received] == [event["id"]]
+
+
+def test_geochat_daemon_broadcasts_presence_for_low_precision_watches() -> None:
+    async def exercise() -> None:
+        subscribed = asyncio.Event()
+        published: list[dict[str, object]] = []
+
+        async def handler(websocket) -> None:
+            async for raw in websocket:
+                message = json.loads(raw)
+                if message[0] == "REQ":
+                    subscribed.set()
+                    continue
+                if message[0] == "EVENT":
+                    published.append(message[1])
+
+        async with serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            with TemporaryDirectory() as tmpdir:
+                original_closest_relays = geochat.closest_relays
+                daemon = geochat.GeoChatDaemon(
+                    relay_cache_path=Path(tmpdir) / "georelays.csv",
+                    seed_hex="aa" * 32,
+                    nickname="local",
+                    on_message=lambda _event: None,
+                    presence_interval_range_seconds=(0.01, 0.02),
+                    presence_step_delay_range_seconds=(0.0, 0.0),
+                    presence_idle_seconds=0.01,
+                )
+                daemon._relay_entries = [geochat.GeoRelayEntry(host=f"127.0.0.1:{port}", lat=57.64911, lon=10.40744)]
+                geochat.closest_relays = lambda _entries, _geohash, count=5: [f"ws://127.0.0.1:{port}"]  # type: ignore[assignment]
+                try:
+                    await daemon.start(["u4pru"])
+                    await asyncio.wait_for(subscribed.wait(), timeout=2)
+                    await asyncio.wait_for(_wait_until(lambda: len(published) > 0), timeout=2)
+                    await daemon.stop()
+                finally:
+                    geochat.closest_relays = original_closest_relays  # type: ignore[assignment]
+
+        assert published
+        assert published[0]["kind"] == 20001
+        assert published[0]["content"] == ""
+        assert ["g", "u4pru"] in published[0]["tags"]
+
+    asyncio.run(exercise())
+
+
+async def _wait_until(predicate, *, interval: float = 0.01) -> None:
+    while not predicate():
+        await asyncio.sleep(interval)

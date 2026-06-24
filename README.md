@@ -103,6 +103,9 @@ Behavior notes:
 - `geo watch add/remove/list` manages the geohash channels the daemon keeps
   subscribed in the background, so location-channel messages can arrive while
   no interactive client is open.
+- Watched geohashes with precision `<= 5` now emit periodic kind `20001`
+  presence heartbeats in the background, matching the official app's
+  coarse-location presence model.
 - `geo send <geohash> ...` publishes a real kind `20000` geohash-scoped Nostr
   event, signed with the same deterministic HMAC-derived per-geohash identity
   shape the macOS app uses.
