@@ -1,0 +1,61 @@
+# bitchat-cli
+
+`bitchat-cli` is a clean-room Python CLI for BitChat public chat over Bluetooth LE.
+
+Current scope:
+
+- Real BitChat mainnet BLE UUIDs
+- Official announce packet format
+- Official packet signing and peer ID derivation
+- Public broadcast chat with persistent local identity
+- Central-role BLE transport using `bleak`
+- Offline protocol self-tests
+
+Not implemented in this first cut:
+
+- Noise private messaging
+- Multi-hop relay participation
+- BLE peripheral advertising
+- File transfer
+- Fragmented message reassembly
+- Nostr geohash chat
+
+## Quick start
+
+```bash
+uv sync
+uv run bitchat doctor
+uv run bitchat chat --nickname breno
+```
+
+Inside chat:
+
+- `/help`
+- `/name <nickname>`
+- `/who`
+- `/clear`
+- `/quit`
+
+Any non-slash input is sent as a public BitChat message.
+
+## Background listener
+
+Run the receiver in the background so inbound messages are recorded even when no
+interactive chat is open:
+
+```bash
+uv run bitchat daemon start --nickname breno
+uv run bitchat daemon status
+uv run bitchat inbox --tail 20
+uv run bitchat daemon stop
+```
+
+Daemon artifacts live under `~/.config/bitchat-cli/`:
+
+- `daemon.log` - background listener log
+- `messages.jsonl` - recorded message history
+- `daemon.pid` - running daemon pid
+
+## Notes
+
+This implementation is intentionally narrow. It aims to interoperate with the official apps for signed public chat without claiming full protocol coverage.
