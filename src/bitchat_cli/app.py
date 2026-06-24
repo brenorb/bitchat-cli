@@ -57,7 +57,7 @@ def doctor_payload(store: StateStore) -> dict[str, object]:
             "mesh_relay": False,
             "ble_peripheral": False,
             "nostr_geochat": False,
-            "fragment_reassembly": False,
+            "fragment_reassembly": True,
         },
     }
 

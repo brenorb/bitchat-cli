@@ -9,6 +9,7 @@ Current scope:
 - Official packet signing and peer ID derivation
 - Public broadcast chat with persistent local identity
 - Central-role BLE transport using `bleak`
+- Inbound fragment reassembly and outbound packet fragmentation for oversized BLE payloads
 - Offline protocol self-tests
 
 Not implemented in this first cut:
@@ -17,7 +18,6 @@ Not implemented in this first cut:
 - Multi-hop relay participation
 - BLE peripheral advertising
 - File transfer
-- Fragmented message reassembly
 - Nostr geohash chat
 
 ## Quick start

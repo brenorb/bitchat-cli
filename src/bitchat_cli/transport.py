@@ -12,6 +12,7 @@ from bleak import BleakClient, BleakScanner
 from .constants import CHARACTERISTIC_UUID, MAX_PACKET_SIZE, SERVICE_UUID, MessageType
 from .crypto import Identity, peer_id_from_noise_public_key
 from .dedupe import ExpiringSet, packet_cache_key
+from .fragments import FragmentAssemblyBuffer, fragment_packet_sequence
 from .protocol import Announcement, Packet, make_announce_packet, make_leave_packet, make_public_message_packet
 
 
@@ -51,6 +52,7 @@ class BLEChatTransport:
         self.known_peers: dict[str, PeerRecord] = {}
         self._recent_own_signatures: deque[str] = deque(maxlen=128)
         self._recent_inbound_messages = ExpiringSet(ttl_seconds=300.0, max_entries=1000)
+        self._fragment_buffer = FragmentAssemblyBuffer()
         self._reconnect_ready_at: dict[str, float] = {}
         self._scan_task: asyncio.Task[None] | None = None
         self._scanner: BleakScanner | None = None
@@ -200,6 +202,19 @@ class BLEChatTransport:
         except Exception:
             return
 
+        await self._handle_decoded_packet(address, packet)
+
+    async def _handle_decoded_packet(self, address: str, packet: Packet) -> None:
+        if packet.packet_type == MessageType.FRAGMENT:
+            try:
+                reassembled = self._fragment_buffer.append(packet)
+            except Exception as exc:
+                self.system_log(f"Ignored invalid fragment stream from {address}: {exc}")
+                return
+            if reassembled is not None:
+                await self._handle_decoded_packet(address, reassembled)
+            return
+
         signature_hex = packet.signature.hex() if packet.signature else None
         if packet.sender_id.hex() == self.identity.peer_id or (
             signature_hex is not None and signature_hex in self._recent_own_signatures
@@ -215,8 +230,6 @@ class BLEChatTransport:
         if packet.packet_type == MessageType.LEAVE:
             self._handle_leave(packet)
             return
-        if packet.packet_type == MessageType.FRAGMENT:
-            self.system_log("Ignored fragmented payload; this CLI does not reassemble fragments yet.")
 
     async def _handle_announce(self, address: str, packet: Packet) -> None:
         try:
@@ -282,11 +295,17 @@ class BLEChatTransport:
 
     async def _write_packet(self, client: BleakClient, packet: Packet) -> None:
         data = packet.encode(padding=False)
-        if len(data) > MAX_PACKET_SIZE:
-            raise ValueError("packet exceeds the first-cut CLI limit; fragmentation is not implemented")
         if packet.signature is not None:
             self._recent_own_signatures.append(packet.signature.hex())
-        await client.write_gatt_char(CHARACTERISTIC_UUID, data, response=False)
+        if len(data) <= MAX_PACKET_SIZE:
+            await client.write_gatt_char(CHARACTERISTIC_UUID, data, response=False)
+            return
+
+        fragments = fragment_packet_sequence(packet)
+        for index, fragment in enumerate(fragments):
+            await client.write_gatt_char(CHARACTERISTIC_UUID, fragment.encode(padding=False), response=False)
+            if index + 1 < len(fragments):
+                await asyncio.sleep(0.03)
 
     def _can_attempt_reconnect(self, address: str) -> bool:
         return time.monotonic() >= self._reconnect_ready_at.get(address, 0.0)
