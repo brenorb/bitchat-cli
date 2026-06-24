@@ -176,6 +176,8 @@ class MessageStore:
         message_kind: str = "message",
         target_peer_id: str | None = None,
         delivery_state: str | None = None,
+        pow_difficulty: int | None = None,
+        teleported: bool | None = None,
     ) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         record = {
@@ -191,6 +193,8 @@ class MessageStore:
             "message_kind": message_kind,
             "target_peer_id": target_peer_id,
             "delivery_state": delivery_state,
+            "pow_difficulty": pow_difficulty,
+            "teleported": teleported,
         }
         append_key = self._append_key(record)
         if append_key is not None:

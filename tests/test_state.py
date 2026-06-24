@@ -135,6 +135,8 @@ def test_message_store_persists_scope_and_conversation_metadata(tmp_path: Path) 
         message_kind="private_message",
         target_peer_id="abcd",
         delivery_state="delivered",
+        pow_difficulty=12,
+        teleported=True,
     )
 
     rows = store.read_all()
@@ -144,6 +146,8 @@ def test_message_store_persists_scope_and_conversation_metadata(tmp_path: Path) 
     assert rows[0]["message_kind"] == "private_message"
     assert rows[0]["target_peer_id"] == "abcd"
     assert rows[0]["delivery_state"] == "delivered"
+    assert rows[0]["pow_difficulty"] == 12
+    assert rows[0]["teleported"] is True
 
 
 def test_peer_store_upserts_replaces_addresses_on_newer_observation(tmp_path: Path) -> None:

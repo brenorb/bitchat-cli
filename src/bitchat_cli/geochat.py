@@ -189,6 +189,29 @@ def event_pow_difficulty(event_id_hex: str) -> int:
     return count
 
 
+def event_committed_pow_difficulty(event: dict[str, object]) -> int | None:
+    raw_tags = event.get("tags")
+    if not isinstance(raw_tags, list):
+        return None
+    for item in raw_tags:
+        if isinstance(item, list) and len(item) >= 3 and item[0] == "nonce":
+            try:
+                return int(str(item[2]))
+            except ValueError:
+                return None
+    return None
+
+
+def event_is_teleported(event: dict[str, object]) -> bool:
+    raw_tags = event.get("tags")
+    if not isinstance(raw_tags, list):
+        return False
+    for item in raw_tags:
+        if isinstance(item, list) and len(item) >= 2 and item[0] == "t" and item[1] == "teleport":
+            return True
+    return False
+
+
 def mine_event_pow(
     event: dict[str, object],
     target_difficulty: int,
@@ -401,7 +424,14 @@ class GeoChatDaemon:
             self._watch_tasks[key] = asyncio.create_task(self._watch_loop(relay_url, geohash))
         self._watched_geohashes = normalized
 
-    async def publish(self, geohash: str, content: str, *, pow_difficulty: int = 0) -> dict[str, object]:
+    async def publish(
+        self,
+        geohash: str,
+        content: str,
+        *,
+        pow_difficulty: int = 0,
+        teleported: bool = False,
+    ) -> dict[str, object]:
         normalized = normalize_geohash(geohash)
         if not self._relay_entries:
             self._relay_entries = load_relay_entries(self.relay_cache_path)
@@ -411,6 +441,7 @@ class GeoChatDaemon:
             geohash=normalized,
             identity=identity,
             nickname=self.nickname,
+            teleported=teleported,
             pow_difficulty=pow_difficulty,
         )
         relays = closest_relays(self._relay_entries, normalized)

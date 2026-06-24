@@ -13,7 +13,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .constants import CHARACTERISTIC_UUID, SERVICE_UUID
-from .geochat import GeoChatDaemon, derive_nostr_identity, event_display_name, event_geohash, normalize_geohash
+from .geochat import (
+    GeoChatDaemon,
+    derive_nostr_identity,
+    event_committed_pow_difficulty,
+    event_display_name,
+    event_geohash,
+    event_is_teleported,
+    event_pow_difficulty,
+    normalize_geohash,
+)
 from .peripheral import create_peripheral_endpoint, peripheral_supported
 from .state import ActiveSessionLease, MessageStore, PeerStore, RuntimePaths, StateStore, pid_is_running
 from .transport import BLEChatTransport
@@ -101,6 +110,12 @@ def _record_geohash_event(
         scope="public",
         conversation_id=geohash,
         message_kind=message_kind,
+        pow_difficulty=(
+            event_pow_difficulty(str(event.get("id") or ""))
+            if event_committed_pow_difficulty(event) is not None and str(event.get("id") or "")
+            else None
+        ),
+        teleported=event_is_teleported(event),
     )
     if kind == 20001:
         return
@@ -142,6 +157,7 @@ def _geohash_participants(
             "sender": str(row.get("sender") or ""),
             "last_seen": timestamp.isoformat(),
             "message_kind": str(row.get("message_kind") or ""),
+            "teleported": bool(row.get("teleported") or False),
         }
     return sorted(participants.values(), key=lambda row: row["last_seen"], reverse=True)
 
@@ -763,6 +779,7 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                 elif command == "geo_send":
                     geohash = str(payload.get("geohash") or "")
                     content = str(payload.get("content") or "")
+                    teleported = bool(payload.get("teleported"))
                     try:
                         pow_difficulty = int(payload.get("pow_difficulty") or 0)
                     except (TypeError, ValueError):
@@ -772,7 +789,12 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                     elif pow_difficulty < 0:
                         response = {"ok": False, "error": "invalid pow_difficulty"}
                     else:
-                        event = await geochat.publish(geohash, content, pow_difficulty=pow_difficulty)
+                        event = await geochat.publish(
+                            geohash,
+                            content,
+                            pow_difficulty=pow_difficulty,
+                            teleported=teleported,
+                        )
                         now = datetime.fromtimestamp(int(event["created_at"]), tz=timezone.utc)
                         message_store.append(
                             direction="outbound",
@@ -784,6 +806,12 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                             scope="public",
                             conversation_id=geohash,
                             message_kind="geohash_message",
+                            pow_difficulty=(
+                                event_pow_difficulty(str(event["id"]))
+                                if event_committed_pow_difficulty(event) is not None
+                                else None
+                            ),
+                            teleported=event_is_teleported(event),
                         )
                         response = {"ok": True, "message_id": event["id"]}
                 elif command == "geo_watch_set":
@@ -1144,7 +1172,13 @@ def run_geo_inbox(args: argparse.Namespace) -> int:
         print(f"no inbound messages recorded for #{geohash}")
         return 0
     for row in records:
-        print(f"{row['timestamp']} #{geohash} <{row['sender']}> {row['content']}")
+        suffixes: list[str] = []
+        if row.get("pow_difficulty") is not None:
+            suffixes.append(f"[{int(row['pow_difficulty'])}b]")
+        if row.get("teleported"):
+            suffixes.append("[teleport]")
+        suffix = f" {' '.join(suffixes)}" if suffixes else ""
+        print(f"{row['timestamp']} #{geohash} <{row['sender']}> {row['content']}{suffix}")
     return 0
 
 
@@ -1170,7 +1204,8 @@ def run_geo_who(args: argparse.Namespace) -> int:
         return 0
     print(f"#{geohash} participants")
     for row in participants:
-        print(f"{row['sender']:20} {row['last_seen']}")
+        suffix = " teleport" if row.get("teleported") else ""
+        print(f"{row['sender']:20} {row['last_seen']}{suffix}")
     return 0
 
 
@@ -1248,6 +1283,7 @@ def run_geo_send(args: argparse.Namespace) -> int:
                 "geohash": geohash,
                 "content": args.message,
                 "pow_difficulty": int(args.pow),
+                "teleported": bool(args.teleport),
             },
         )
     except RuntimeError as exc:

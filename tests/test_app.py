@@ -380,9 +380,36 @@ def test_record_geohash_event_persists_presence_without_printing(tmp_path: Path)
             "message_kind": "geohash_presence",
             "target_peer_id": None,
             "delivery_state": None,
+            "pow_difficulty": None,
+            "teleported": False,
         }
     ]
     assert log_handle.getvalue() == ""
+
+
+def test_record_geohash_event_persists_pow_and_teleport_metadata(tmp_path: Path) -> None:
+    store = MessageStore(tmp_path / "messages.jsonl")
+    log_handle = io.StringIO()
+
+    app._record_geohash_event(
+        {
+            "id": "evt-2",
+            "pubkey": "cd" * 32,
+            "created_at": 1_719_188_401,
+            "kind": 20000,
+            "tags": [["g", "u4pruy"], ["n", "bubbles"], ["nonce", "1", "12"], ["t", "teleport"]],
+            "content": "hello geo",
+        },
+        message_store=store,
+        log_handle=log_handle,
+    )
+
+    rows = store.read_all()
+    assert rows[0]["message_kind"] == "geohash_message"
+    assert rows[0]["pow_difficulty"] is not None
+    assert rows[0]["pow_difficulty"] >= 0
+    assert rows[0]["teleported"] is True
+    assert "hello geo" in log_handle.getvalue()
 
 
 def test_run_geo_send_passes_pow_difficulty_to_daemon(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -395,7 +422,9 @@ def test_run_geo_send_passes_pow_difficulty_to_daemon(tmp_path: Path, monkeypatc
         lambda _runtime, payload: commands.append(payload) or {"ok": True, "message_id": "geo-1"},
     )
 
-    exit_code = app.run_geo_send(argparse.Namespace(geohash="#U4PrUy", message="hello geo", pow=12))
+    exit_code = app.run_geo_send(
+        argparse.Namespace(geohash="#U4PrUy", message="hello geo", pow=12, teleport=True)
+    )
 
     captured = capsys.readouterr()
     assert exit_code == 0
@@ -405,9 +434,37 @@ def test_run_geo_send_passes_pow_difficulty_to_daemon(tmp_path: Path, monkeypatc
             "geohash": "u4pruy",
             "content": "hello geo",
             "pow_difficulty": 12,
+            "teleported": True,
         }
     ]
     assert "queued geohash message" in captured.out
+
+
+def test_run_geo_inbox_displays_pow_and_teleport_metadata(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    store = MessageStore(runtime.inbox_path)
+    timestamp = datetime(2026, 6, 24, 0, 9, 44, tzinfo=timezone.utc)
+    store.append(
+        direction="inbound",
+        sender="bubbles#aa11",
+        content="geo hello",
+        timestamp=timestamp,
+        peer_id="a" * 64,
+        message_id="geo-1",
+        scope="public",
+        conversation_id="u4pruy",
+        message_kind="geohash_message",
+        pow_difficulty=10,
+        teleported=True,
+    )
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+
+    exit_code = app.run_geo_inbox(argparse.Namespace(geohash="#u4pruy", json=False, tail=None))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "[10b]" in captured.out
+    assert "[teleport]" in captured.out
 
 
 def test_run_geo_who_lists_recent_participants_and_excludes_self(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -440,6 +497,7 @@ def test_run_geo_who_lists_recent_participants_and_excludes_self(tmp_path: Path,
         scope="public",
         conversation_id="u4pruy",
         message_kind="geohash_message",
+        teleported=True,
     )
     store.append(
         direction="inbound",
@@ -483,6 +541,7 @@ def test_run_geo_who_lists_recent_participants_and_excludes_self(tmp_path: Path,
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "bubbles#931e" in captured.out
+    assert "teleport" in captured.out
     assert "clanker#1234" not in captured.out
     assert "oldie#0001" not in captured.out
 

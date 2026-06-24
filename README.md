@@ -59,6 +59,7 @@ uv run bitchat mesh send "hello #mesh"
 uv run bitchat geo watch add u4pruy
 uv run bitchat geo send u4pruy "hello #u4pruy"
 uv run bitchat geo send u4pruy --pow 12 "hello with PoW"
+uv run bitchat geo send u4pruy --teleport "hello from a teleported channel"
 uv run bitchat geo inbox u4pruy --tail 20
 uv run bitchat geo who u4pruy
 uv run bitchat peers
@@ -113,6 +114,8 @@ Behavior notes:
   `["nonce", value, difficulty]` tag the Android app expects when geohash PoW
   is enabled. The CLI defaults to `--pow 0`, matching the official app's
   default of leaving PoW disabled.
+- `geo send <geohash> --teleport ...` adds the same `["t","teleport"]` tag the
+  official apps use for manually teleported geohash messages.
 - The daemon caches the official `permissionlesstech/georelays` CSV locally and
   picks the closest relays to the target geohash center, matching the app's
   geohash relay selection model at a smaller implementation scope.
@@ -120,7 +123,8 @@ Behavior notes:
   so the same relay fanout no longer appears repeated in `geo inbox`.
 - `inbox` is the `#mesh` view for the BLE public conversation, and `mesh send`
   / `mesh inbox` expose that same scope explicitly in the CLI.
-- `geo inbox <geohash>` is the inbound view for one location channel.
+- `geo inbox <geohash>` is the inbound view for one location channel and now
+  shows PoW / teleport markers when the event carries them.
 - `geo who <geohash>` lists recently seen participants from geohash messages and
   presence heartbeats, excluding the CLI's own derived geohash identity.
 - The macOS peripheral endpoint now exposes the same BLE characteristic surface

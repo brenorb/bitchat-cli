@@ -90,6 +90,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Optional NIP-13 proof-of-work difficulty in leading zero bits",
     )
+    geo_send.add_argument(
+        "--teleport",
+        action="store_true",
+        help="Mark the geohash message as teleported, matching the official app tag",
+    )
     geo_send.add_argument("message", help="Message body")
     geo_send.set_defaults(handler=run_geo_send)
 
