@@ -6,7 +6,7 @@ from datetime import datetime
 
 from bitchat_cli.constants import MessageType
 from bitchat_cli.crypto import Identity
-from bitchat_cli.protocol import Packet
+from bitchat_cli.protocol import Packet, make_noise_handshake_packet, make_public_message_packet
 from bitchat_cli.transport import BLEChatTransport, PeerRecord
 
 
@@ -268,5 +268,143 @@ def test_fresh_inbound_handshake_replaces_established_session() -> None:
 
         assert len(bob_outbox) == 1
         assert bob_outbox[0].packet.packet_type == MessageType.NOISE_HANDSHAKE
+
+    asyncio.run(case())
+
+
+def test_public_message_relays_once_and_dedupes_looped_copy() -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        alice_identity = Identity.generate()
+        charlie_identity = Identity.generate()
+        public_messages: list[tuple[str, str, datetime, str | None, str | None]] = []
+        transport = BLEChatTransport(
+            identity=local_identity,
+            nickname="local",
+            system_log=lambda _message: None,
+            message_log=lambda sender, content, timestamp, peer_id, message_id: public_messages.append(
+                (sender, content, timestamp, peer_id, message_id)
+            ),
+        )
+        _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="A1")
+        _register_known_peer(transport, peer_identity=charlie_identity, nickname="charlie", address="C1")
+        transport.clients = {"A1": "A1", "C1": "C1"}  # type: ignore[assignment]
+
+        relayed_packets: list[tuple[str, Packet]] = []
+
+        async def fake_write(client, packet: Packet) -> None:
+            relayed_packets.append((client, packet))
+
+        transport._write_packet = fake_write  # type: ignore[method-assign]
+
+        inbound = make_public_message_packet(alice_identity, "hello mesh")
+        await transport._handle_decoded_packet("A1", inbound)
+
+        assert len(public_messages) == 1
+        assert public_messages[0][0] == "alice"
+        assert public_messages[0][1] == "hello mesh"
+        assert len(relayed_packets) == 1
+        assert relayed_packets[0][0] == "C1"
+        assert relayed_packets[0][1].ttl == inbound.ttl - 1
+
+        looped_copy = Packet(
+            packet_type=inbound.packet_type,
+            sender_id=inbound.sender_id,
+            recipient_id=inbound.recipient_id,
+            timestamp_ms=inbound.timestamp_ms,
+            payload=inbound.payload,
+            signature=inbound.signature,
+            ttl=inbound.ttl - 1,
+            version=inbound.version,
+        )
+        await transport._handle_decoded_packet("C1", looped_copy)
+
+        assert len(public_messages) == 1
+        assert len(relayed_packets) == 1
+
+    asyncio.run(case())
+
+
+def test_directed_noise_handshake_relays_without_creating_local_session() -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        alice_identity = Identity.generate()
+        charlie_identity = Identity.generate()
+        transport = _make_transport(
+            identity=local_identity,
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+        )
+        _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="A1")
+        _register_known_peer(transport, peer_identity=charlie_identity, nickname="charlie", address="C1")
+        transport.clients = {"A1": "A1", "C1": "C1"}  # type: ignore[assignment]
+
+        relayed_packets: list[tuple[str, Packet]] = []
+
+        async def fake_write(client, packet: Packet) -> None:
+            relayed_packets.append((client, packet))
+
+        transport._write_packet = fake_write  # type: ignore[method-assign]
+
+        inbound = make_noise_handshake_packet(alice_identity, charlie_identity.peer_id, b"hs1", timestamp_ms=1234)
+        await transport._handle_decoded_packet("A1", inbound)
+
+        assert transport._noise_sessions == {}
+        assert len(relayed_packets) == 1
+        assert relayed_packets[0][0] == "C1"
+        assert relayed_packets[0][1].packet_type == MessageType.NOISE_HANDSHAKE
+        assert relayed_packets[0][1].ttl == inbound.ttl - 1
+        assert relayed_packets[0][1].recipient_id == bytes.fromhex(charlie_identity.peer_id)
+
+    asyncio.run(case())
+
+
+def test_duplicate_handshake_packet_is_suppressed_after_session_establishes() -> None:
+    async def case() -> None:
+        alice_identity = Identity.generate()
+        bob_identity = Identity.generate()
+        alice = _make_transport(
+            identity=alice_identity,
+            nickname="alice",
+            private_messages=[],
+            receipts=[],
+        )
+        bob = _make_transport(
+            identity=bob_identity,
+            nickname="bob",
+            private_messages=[],
+            receipts=[],
+        )
+        _register_known_peer(alice, peer_identity=bob_identity, nickname="bob", address="B1")
+        _register_known_peer(bob, peer_identity=alice_identity, nickname="alice", address="A1")
+
+        alice_outbox: list[CapturedPacket] = []
+        bob_outbox: list[CapturedPacket] = []
+
+        async def alice_send(peer_id: str, packet: Packet) -> None:
+            alice_outbox.append(CapturedPacket(peer_id=peer_id, packet=packet))
+
+        async def bob_send(peer_id: str, packet: Packet) -> None:
+            bob_outbox.append(CapturedPacket(peer_id=peer_id, packet=packet))
+
+        alice._send_packet_to_peer = alice_send  # type: ignore[method-assign]
+        bob._send_packet_to_peer = bob_send  # type: ignore[method-assign]
+
+        await alice.send_private_message(bob_identity.peer_id, "hello", message_id="m-1")
+        handshake_1 = alice_outbox.pop(0).packet
+        await bob._handle_decoded_packet("A1", handshake_1)
+        handshake_2 = bob_outbox.pop(0).packet
+        await alice._handle_decoded_packet("B1", handshake_2)
+        handshake_3 = alice_outbox.pop(0).packet
+        await bob._handle_decoded_packet("A1", handshake_3)
+
+        session = bob._noise_sessions[alice_identity.peer_id]
+        assert session.is_established() is True
+
+        await bob._handle_decoded_packet("A1", handshake_3)
+
+        assert bob._noise_sessions[alice_identity.peer_id] is session
+        assert bob_outbox == []
 
     asyncio.run(case())

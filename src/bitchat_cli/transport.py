@@ -79,6 +79,7 @@ class BLEChatTransport:
         self._noise_sessions: dict[str, NoiseSession] = {}
         self._pending_noise_payloads: dict[str, deque[bytes]] = {}
         self._recent_own_signatures: deque[str] = deque(maxlen=128)
+        self._recent_seen_packets = ExpiringSet(ttl_seconds=300.0, max_entries=4000)
         self._recent_inbound_messages = ExpiringSet(ttl_seconds=300.0, max_entries=1000)
         self._fragment_buffer = FragmentAssemblyBuffer()
         self._reconnect_ready_at: dict[str, float] = {}
@@ -281,6 +282,10 @@ class BLEChatTransport:
         await self._handle_decoded_packet(address, packet)
 
     async def _handle_decoded_packet(self, address: str, packet: Packet) -> None:
+        packet_key = packet_cache_key(packet)
+        if self._recent_seen_packets.mark_seen(packet_key):
+            return
+
         if packet.packet_type == MessageType.FRAGMENT:
             try:
                 reassembled = self._fragment_buffer.append(packet)
@@ -297,6 +302,8 @@ class BLEChatTransport:
         ):
             return
 
+        await self._relay_if_needed(address, packet)
+
         if packet.packet_type == MessageType.ANNOUNCE:
             await self._handle_announce(address, packet)
             return
@@ -312,6 +319,37 @@ class BLEChatTransport:
         if packet.packet_type == MessageType.LEAVE:
             self._handle_leave(packet)
             return
+
+    async def _relay_if_needed(self, ingress_address: str, packet: Packet) -> None:
+        if packet.ttl <= 1:
+            return
+        recipient_is_self = packet.recipient_id is not None and packet.recipient_id.hex() == self.identity.peer_id
+        if recipient_is_self:
+            return
+        if packet.packet_type == MessageType.REQUEST_SYNC:
+            return
+
+        relayable_types = {
+            MessageType.ANNOUNCE,
+            MessageType.MESSAGE,
+            MessageType.LEAVE,
+            MessageType.NOISE_HANDSHAKE,
+            MessageType.NOISE_ENCRYPTED,
+        }
+        if packet.packet_type not in relayable_types:
+            return
+
+        relayed_packet = Packet(
+            packet_type=packet.packet_type,
+            sender_id=packet.sender_id,
+            recipient_id=packet.recipient_id,
+            timestamp_ms=packet.timestamp_ms,
+            payload=packet.payload,
+            signature=packet.signature,
+            ttl=packet.ttl - 1,
+            version=packet.version,
+        )
+        await self._broadcast_packet(relayed_packet, exclude_addresses={ingress_address})
 
     async def _handle_announce(self, address: str, packet: Packet) -> None:
         try:
@@ -571,10 +609,12 @@ class BLEChatTransport:
         await asyncio.gather(*(self._write_packet(client, packet) for client in target_clients), return_exceptions=True)
         return True
 
-    async def _broadcast_packet(self, packet: Packet) -> None:
-        clients = list(self.clients.values())
+    async def _broadcast_packet(self, packet: Packet, *, exclude_addresses: set[str] | None = None) -> None:
+        excluded = exclude_addresses or set()
+        clients = [client for address, client in self.clients.items() if address not in excluded]
         if not clients:
-            self.system_log("No connected peers yet.")
+            if not excluded:
+                self.system_log("No connected peers yet.")
             return
         await asyncio.gather(*(self._write_packet(client, packet) for client in clients), return_exceptions=True)
 

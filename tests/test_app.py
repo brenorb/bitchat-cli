@@ -9,6 +9,15 @@ from bitchat_cli.crypto import Identity
 from bitchat_cli.state import MessageStore, PeerStore, RuntimePaths
 
 
+def test_doctor_payload_reports_mesh_relay_support(tmp_path: Path, monkeypatch) -> None:
+    runtime = RuntimePaths(tmp_path)
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+
+    payload = app.doctor_payload(app.StateStore(runtime.state_path))
+
+    assert payload["scope"]["mesh_relay"] is True
+
+
 def test_run_peers_lists_persisted_peers(tmp_path: Path, monkeypatch, capsys) -> None:
     runtime = RuntimePaths(tmp_path)
     identity = Identity.generate()

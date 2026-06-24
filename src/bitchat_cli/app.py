@@ -142,7 +142,7 @@ def doctor_payload(store: StateStore) -> dict[str, object]:
         "scope": {
             "public_chat": True,
             "private_noise_chat": True,
-            "mesh_relay": False,
+            "mesh_relay": True,
             "ble_peripheral": False,
             "nostr_geochat": False,
             "fragment_reassembly": True,

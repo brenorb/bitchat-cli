@@ -12,12 +12,12 @@ Current scope:
 - Inbound fragment reassembly and outbound packet fragmentation for oversized BLE payloads
 - Direct BLE private messaging over Noise XX with lazy handshake
 - Official Noise XX session primitives validated against the macOS app's test vectors
+- Duplicate-safe multi-hop relay for public traffic and directed Noise packets
 - Private-message history capture plus `dm inbox` / `dm history`
 - Offline protocol self-tests
 
-Not implemented in this first cut:
+Still not implemented:
 
-- Multi-hop relay participation
 - BLE peripheral advertising
 - File transfer
 - Nostr geohash chat
@@ -71,6 +71,9 @@ Behavior notes:
 - The daemon now follows the macOS app's basic scanning shape: duty-cycled
   background scanning instead of a tight `discover()` loop.
 - `inbox` deduplicates repeated deliveries of the same signed BitChat packet.
+- The transport relays signed public packets plus directed Noise handshakes and
+  encrypted payloads across connected peers with TTL decrement and loop
+  suppression.
 - Private messages are persisted separately from the public inbox and exposed
   through `bitchat dm inbox` and `bitchat dm history`.
 - Only one CLI BLE session can own the radio at a time, so `chat` and `daemon`
