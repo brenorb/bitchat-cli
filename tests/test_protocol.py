@@ -4,12 +4,15 @@ from bitchat_cli.constants import MessageType
 from bitchat_cli.crypto import Identity, peer_id_from_noise_public_key
 from bitchat_cli.protocol import (
     Announcement,
+    FilePacket,
     NoisePayload,
     NoisePayloadType,
     Packet,
     PrivateMessagePacket,
     make_announce_packet,
     make_delivered_payload,
+    make_file_transfer_packet,
+    make_noise_encrypted_packet,
     make_public_message_packet,
     make_read_receipt_payload,
 )
@@ -130,6 +133,53 @@ def test_private_message_packet_rejects_unknown_tlv_and_truncation() -> None:
 
     with pytest.raises(ValueError):
         PrivateMessagePacket.decode(bytes([0x00, 0x05, 0x61, 0x62]))
+
+
+def test_file_packet_round_trip() -> None:
+    packet = FilePacket(
+        file_name="photo.jpg",
+        file_size=5,
+        mime_type="image/jpeg",
+        content=b"12345",
+    )
+
+    decoded = FilePacket.decode(packet.encode())
+
+    assert decoded == packet
+
+
+def test_file_transfer_packet_uses_protocol_v2_and_verifies_signature() -> None:
+    identity = Identity.generate()
+    file_packet = FilePacket(
+        file_name="note.txt",
+        file_size=11,
+        mime_type="text/plain",
+        content=b"hello world",
+    )
+
+    packet = make_file_transfer_packet(identity, file_packet, timestamp_ms=1_700_000_000_000)
+    decoded = Packet.decode(packet.encode(padding=False))
+
+    assert decoded.version == 2
+    assert decoded.packet_type == MessageType.FILE_TRANSFER
+    assert FilePacket.decode(decoded.payload) == file_packet
+    assert decoded.verify_signature(identity.signing_public_key)
+
+
+def test_noise_encrypted_packet_uses_protocol_v2_for_large_payloads() -> None:
+    identity = Identity.generate()
+
+    packet = make_noise_encrypted_packet(
+        identity,
+        recipient_peer_id=Identity.generate().peer_id,
+        payload=b"x" * 70000,
+        timestamp_ms=1_700_000_000_000,
+    )
+    decoded = Packet.decode(packet.encode(padding=False))
+
+    assert packet.version == 2
+    assert decoded.version == 2
+    assert decoded.payload == b"x" * 70000
 
 
 def test_noise_payload_round_trip_and_receipt_helpers() -> None:

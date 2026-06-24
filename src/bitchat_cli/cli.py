@@ -12,6 +12,7 @@ from .app import (
     run_dm_history,
     run_dm_inbox,
     run_dm_send,
+    run_dm_send_file,
     run_doctor,
     run_geo_inbox,
     run_geo_send,
@@ -22,6 +23,7 @@ from .app import (
     run_inbox,
     run_peers,
     run_send,
+    run_send_file,
     run_selftest,
 )
 
@@ -75,9 +77,17 @@ def build_parser() -> argparse.ArgumentParser:
     mesh_send.add_argument("message", help="Message body")
     mesh_send.set_defaults(handler=run_send)
 
+    mesh_send_file = mesh_subparsers.add_parser("send-file", help="Send one public file to #mesh through the background daemon")
+    mesh_send_file.add_argument("path", help="Path to a local file")
+    mesh_send_file.set_defaults(handler=run_send_file)
+
     send = subparsers.add_parser("send", help="Send one public message through the background daemon")
     send.add_argument("message", help="Message body")
     send.set_defaults(handler=run_send)
+
+    send_file = subparsers.add_parser("send-file", help="Send one public file through the background daemon")
+    send_file.add_argument("path", help="Path to a local file")
+    send_file.set_defaults(handler=run_send_file)
 
     geo = subparsers.add_parser("geo", help="Work with location geohash channels over Nostr")
     geo_subparsers = geo.add_subparsers(dest="geo_command", required=True)
@@ -146,6 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
     dm_send.add_argument("target", help="Peer ID or @nickname")
     dm_send.add_argument("message", help="Message body")
     dm_send.set_defaults(handler=run_dm_send)
+
+    dm_send_file = dm_subparsers.add_parser("send-file", help="Send one file over DM through the background daemon")
+    dm_send_file.add_argument("target", help="Peer ID or @nickname")
+    dm_send_file.add_argument("path", help="Path to a local file")
+    dm_send_file.set_defaults(handler=run_dm_send_file)
 
     selftest = subparsers.add_parser("selftest", help="Run offline protocol checks")
     selftest.set_defaults(handler=run_selftest)

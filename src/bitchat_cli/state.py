@@ -109,6 +109,14 @@ class RuntimePaths:
         return self.root / "georelays_cache.csv"
 
     @property
+    def incoming_files_dir(self) -> Path:
+        return self.root / "files" / "incoming"
+
+    @property
+    def incoming_images_dir(self) -> Path:
+        return self.root / "images" / "incoming"
+
+    @property
     def radio_pid_path(self) -> Path:
         return self.root / "radio.pid"
 
@@ -178,6 +186,9 @@ class MessageStore:
         delivery_state: str | None = None,
         pow_difficulty: int | None = None,
         teleported: bool | None = None,
+        attachment_name: str | None = None,
+        attachment_mime: str | None = None,
+        attachment_size_bytes: int | None = None,
     ) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         record = {
@@ -196,6 +207,12 @@ class MessageStore:
             "pow_difficulty": pow_difficulty,
             "teleported": teleported,
         }
+        if attachment_name is not None:
+            record["attachment_name"] = attachment_name
+        if attachment_mime is not None:
+            record["attachment_mime"] = attachment_mime
+        if attachment_size_bytes is not None:
+            record["attachment_size_bytes"] = attachment_size_bytes
         append_key = self._append_key(record)
         if append_key is not None:
             self._ensure_append_index()

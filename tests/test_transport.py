@@ -4,15 +4,27 @@ import asyncio
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import bitchat_cli.transport as transport_module
 from bitchat_cli.constants import MessageType
 from bitchat_cli.crypto import Identity
+from bitchat_cli.files import transfer_id_for_bytes
+from bitchat_cli.fragments import fragment_packet_sequence
 from bitchat_cli.peripheral import NullPeripheralEndpoint
-from bitchat_cli.protocol import Announcement, Packet, make_announce_packet, make_noise_handshake_packet, make_public_message_packet
+from bitchat_cli.protocol import (
+    Announcement,
+    FilePacket,
+    NoisePayload,
+    NoisePayloadType,
+    Packet,
+    make_announce_packet,
+    make_noise_handshake_packet,
+    make_public_message_packet,
+)
+from bitchat_cli.state import RuntimePaths
 from bitchat_cli.sync import GCSFilter, RequestSyncPacket, SyncTypeFlags, packet_sync_id
 from bitchat_cli.transport import BLEChatTransport, PeerRecord
-from bitchat_cli.fragments import fragment_packet_sequence
 
 
 @dataclass
@@ -57,7 +69,10 @@ def _make_transport(
     nickname: str,
     private_messages: list[tuple[str, str, datetime, str, str]],
     receipts: list[tuple[str, str, str, datetime]],
+    public_files: list[tuple[str, str, str, str, int, datetime, str | None, str]] | None = None,
+    private_files: list[tuple[str, str, str, str, int, datetime, str, str]] | None = None,
     peripheral_endpoint: NullPeripheralEndpoint | None = None,
+    file_runtime_paths: RuntimePaths | None = None,
 ) -> BLEChatTransport:
     return BLEChatTransport(
         identity=identity,
@@ -70,7 +85,22 @@ def _make_transport(
         receipt_log=lambda peer_id, receipt_type, message_id, timestamp: receipts.append(
             (peer_id, receipt_type, message_id, timestamp)
         ),
+        public_file_log=(
+            None
+            if public_files is None
+            else lambda sender, saved_path, file_name, mime_type, file_size, timestamp, peer_id, transfer_id: public_files.append(
+                (sender, saved_path, file_name, mime_type, file_size, timestamp, peer_id, transfer_id)
+            )
+        ),
+        private_file_log=(
+            None
+            if private_files is None
+            else lambda sender, saved_path, file_name, mime_type, file_size, timestamp, peer_id, transfer_id: private_files.append(
+                (sender, saved_path, file_name, mime_type, file_size, timestamp, peer_id, transfer_id)
+            )
+        ),
         peripheral_endpoint=peripheral_endpoint,
+        file_runtime_paths=file_runtime_paths,
     )
 
 
@@ -120,6 +150,70 @@ def test_private_message_without_session_queues_payload_and_starts_handshake() -
         assert list(transport._pending_noise_payloads[bob.peer_id]) != []
         assert private_messages == []
         assert receipts == []
+
+    asyncio.run(case())
+
+
+def test_public_file_without_session_broadcasts_v2_packet(tmp_path: Path) -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        transport = _make_transport(
+            identity=local_identity,
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+        )
+        source = tmp_path / "photo.jpg"
+        source.write_bytes(b"image-bytes")
+        captured: list[Packet] = []
+
+        async def fake_broadcast(packet: Packet, *, exclude_addresses=None) -> None:
+            captured.append(packet)
+
+        transport._broadcast_packet = fake_broadcast  # type: ignore[method-assign]
+
+        transfer_id = await transport.send_public_file(source)
+
+        assert len(captured) == 1
+        assert captured[0].packet_type == MessageType.FILE_TRANSFER
+        assert captured[0].version == 2
+        file_packet = FilePacket.decode(captured[0].payload)
+        assert file_packet.file_name == "photo.jpg"
+        assert transfer_id == transfer_id_for_bytes(file_packet.encode())
+
+    asyncio.run(case())
+
+
+def test_private_file_without_session_queues_payload_and_starts_handshake(tmp_path: Path) -> None:
+    async def case() -> None:
+        alice = Identity.generate()
+        bob = Identity.generate()
+        transport = _make_transport(
+            identity=alice,
+            nickname="alice",
+            private_messages=[],
+            receipts=[],
+        )
+        _register_known_peer(transport, peer_identity=bob, nickname="bob", address="B1")
+        source = tmp_path / "note.txt"
+        source.write_text("hello bob", encoding="utf-8")
+        captured: list[CapturedPacket] = []
+
+        async def fake_send(peer_id: str, packet: Packet) -> None:
+            captured.append(CapturedPacket(peer_id=peer_id, packet=packet))
+
+        transport._send_packet_to_peer = fake_send  # type: ignore[method-assign]
+
+        transfer_id = await transport.send_private_file(bob.peer_id, source)
+        queued = list(transport._pending_noise_payloads[bob.peer_id])
+        typed_payload = NoisePayload.decode(queued[0])
+        file_packet = FilePacket.decode(typed_payload.payload)
+
+        assert transfer_id == transfer_id_for_bytes(file_packet.encode())
+        assert len(captured) == 1
+        assert captured[0].packet.packet_type == MessageType.NOISE_HANDSHAKE
+        assert len(queued) == 1
+        assert typed_payload.payload_type == NoisePayloadType.FILE_TRANSFER
 
     asyncio.run(case())
 
@@ -191,6 +285,103 @@ def test_private_message_handshake_flow_delivers_message_and_receipt() -> None:
         assert alice_receipts == [(bob_identity.peer_id, "delivered", "m-1", alice_receipts[0][3])]
         assert alice._noise_sessions[bob_identity.peer_id].is_established() is True
         assert bob._noise_sessions[alice_identity.peer_id].is_established() is True
+
+    asyncio.run(case())
+
+
+def test_public_file_receive_saves_file_and_logs_callback(tmp_path: Path) -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        alice_identity = Identity.generate()
+        public_files: list[tuple[str, str, str, str, int, datetime, str | None, str]] = []
+        transport = _make_transport(
+            identity=local_identity,
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+            public_files=public_files,
+            file_runtime_paths=RuntimePaths(tmp_path),
+        )
+        _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="A1")
+        packet = Packet.decode(
+            transport_module.make_file_transfer_packet(
+                alice_identity,
+                FilePacket(
+                    file_name="photo.jpg",
+                    file_size=5,
+                    mime_type="image/jpeg",
+                    content=b"12345",
+                ),
+                timestamp_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+            ).encode(padding=False)
+        )
+
+        await transport._handle_decoded_packet("A1", packet)
+
+        assert len(public_files) == 1
+        assert public_files[0][0] == "alice"
+        assert public_files[0][2] == "photo.jpg"
+        assert public_files[0][3] == "image/jpeg"
+        assert public_files[0][4] == 5
+        assert Path(public_files[0][1]).read_bytes() == b"12345"
+
+    asyncio.run(case())
+
+
+def test_private_file_handshake_flow_saves_file_and_sends_delivered_receipt(tmp_path: Path) -> None:
+    async def case() -> None:
+        alice_identity = Identity.generate()
+        bob_identity = Identity.generate()
+        alice_receipts: list[tuple[str, str, str, datetime]] = []
+        bob_private_files: list[tuple[str, str, str, str, int, datetime, str, str]] = []
+        alice = _make_transport(
+            identity=alice_identity,
+            nickname="alice",
+            private_messages=[],
+            receipts=alice_receipts,
+        )
+        bob = _make_transport(
+            identity=bob_identity,
+            nickname="bob",
+            private_messages=[],
+            receipts=[],
+            private_files=bob_private_files,
+            file_runtime_paths=RuntimePaths(tmp_path),
+        )
+        _register_known_peer(alice, peer_identity=bob_identity, nickname="bob", address="B1")
+        _register_known_peer(bob, peer_identity=alice_identity, nickname="alice", address="A1")
+
+        alice_outbox: list[CapturedPacket] = []
+        bob_outbox: list[CapturedPacket] = []
+        source = tmp_path / "send.txt"
+        source.write_text("hello file", encoding="utf-8")
+
+        async def alice_send(peer_id: str, packet: Packet) -> None:
+            alice_outbox.append(CapturedPacket(peer_id=peer_id, packet=packet))
+
+        async def bob_send(peer_id: str, packet: Packet) -> None:
+            bob_outbox.append(CapturedPacket(peer_id=peer_id, packet=packet))
+
+        alice._send_packet_to_peer = alice_send  # type: ignore[method-assign]
+        bob._send_packet_to_peer = bob_send  # type: ignore[method-assign]
+
+        transfer_id = await alice.send_private_file(bob_identity.peer_id, source)
+        await bob._handle_decoded_packet("A1", alice_outbox.pop(0).packet)
+        await alice._handle_decoded_packet("B1", bob_outbox.pop(0).packet)
+        await bob._handle_decoded_packet("A1", alice_outbox.pop(0).packet)
+        await bob._handle_decoded_packet("A1", alice_outbox.pop(0).packet)
+
+        assert len(bob_private_files) == 1
+        assert bob_private_files[0][0] == "alice"
+        assert bob_private_files[0][2] == "send.txt"
+        assert bob_private_files[0][4] == len("hello file")
+        assert bob_private_files[0][7] == transfer_id
+        assert Path(bob_private_files[0][1]).read_text(encoding="utf-8") == "hello file"
+        assert [item.packet.packet_type for item in bob_outbox] == [MessageType.NOISE_ENCRYPTED]
+
+        await alice._handle_decoded_packet("B1", bob_outbox.pop(0).packet)
+
+        assert alice_receipts == [(bob_identity.peer_id, "delivered", transfer_id, alice_receipts[0][3])]
 
     asyncio.run(case())
 

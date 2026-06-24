@@ -16,6 +16,8 @@ def test_runtime_paths_are_stable(tmp_path: Path) -> None:
     assert paths.peers_path == tmp_path / "peers.json"
     assert paths.daemon_socket_path == tmp_path / "daemon.sock"
     assert paths.georelays_cache_path == tmp_path / "georelays_cache.csv"
+    assert paths.incoming_files_dir == tmp_path / "files" / "incoming"
+    assert paths.incoming_images_dir == tmp_path / "images" / "incoming"
 
 
 def test_message_store_round_trip(tmp_path: Path) -> None:
@@ -137,6 +139,9 @@ def test_message_store_persists_scope_and_conversation_metadata(tmp_path: Path) 
         delivery_state="delivered",
         pow_difficulty=12,
         teleported=True,
+        attachment_name="photo.jpg",
+        attachment_mime="image/jpeg",
+        attachment_size_bytes=12345,
     )
 
     rows = store.read_all()
@@ -148,6 +153,9 @@ def test_message_store_persists_scope_and_conversation_metadata(tmp_path: Path) 
     assert rows[0]["delivery_state"] == "delivered"
     assert rows[0]["pow_difficulty"] == 12
     assert rows[0]["teleported"] is True
+    assert rows[0]["attachment_name"] == "photo.jpg"
+    assert rows[0]["attachment_mime"] == "image/jpeg"
+    assert rows[0]["attachment_size_bytes"] == 12345
 
 
 def test_peer_store_upserts_replaces_addresses_on_newer_observation(tmp_path: Path) -> None:

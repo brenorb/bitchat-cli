@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .constants import CHARACTERISTIC_UUID, SERVICE_UUID
+from .files import format_file_size, load_outgoing_file
 from .geochat import (
     GeoChatDaemon,
     derive_nostr_identity,
@@ -83,6 +84,24 @@ def _read_dm_records(runtime: RuntimePaths) -> list[dict[str, object]]:
 def _read_public_records(runtime: RuntimePaths) -> list[dict[str, object]]:
     rows = MessageStore(runtime.inbox_path).read_all(deduplicate=True)
     return [row for row in rows if row.get("direction") == "inbound" and row.get("scope", "public") == "public"]
+
+
+def _attachment_label(row: dict[str, object]) -> str:
+    mime_type = str(row.get("attachment_mime") or "")
+    return "image" if mime_type.startswith("image/") else "file"
+
+
+def _attachment_summary(row: dict[str, object]) -> str:
+    label = _attachment_label(row)
+    name = str(row.get("attachment_name") or Path(str(row.get("content") or "file")).name or "file")
+    size_bytes = row.get("attachment_size_bytes")
+    size_suffix = (
+        f" ({format_file_size(int(size_bytes))})"
+        if isinstance(size_bytes, int)
+        else ""
+    )
+    path_suffix = f" -> {row.get('content')}" if row.get("content") else ""
+    return f"[{label}] {name}{size_suffix}{path_suffix}"
 
 
 def _record_geohash_event(
@@ -240,6 +259,7 @@ def doctor_payload(store: StateStore) -> dict[str, object]:
         "scope": {
             "public_chat": True,
             "private_noise_chat": True,
+            "file_transfer": True,
             "mesh_relay": True,
             "local_sync": True,
             "ble_peripheral": peripheral_supported(),
@@ -288,7 +308,10 @@ def _build_transport(
     peer_log,
     private_message_log,
     receipt_log,
+    public_file_log=None,
+    private_file_log=None,
     background_mode: bool,
+    file_runtime_paths: RuntimePaths | None = None,
 ) -> BLEChatTransport:
     transport = BLEChatTransport(
         identity=identity,
@@ -298,8 +321,11 @@ def _build_transport(
         peer_log=peer_log,
         private_message_log=private_message_log,
         receipt_log=receipt_log,
+        public_file_log=public_file_log,
+        private_file_log=private_file_log,
         scan_interval=scan_interval,
         background_mode=background_mode,
+        file_runtime_paths=file_runtime_paths,
     )
     try:
         loop = asyncio.get_running_loop()
@@ -433,6 +459,71 @@ async def run_chat(args: argparse.Namespace) -> int:
             delivery_state=receipt_type,
         )
 
+    def public_file_log(
+        sender: str,
+        saved_path: str,
+        file_name: str,
+        mime_type: str,
+        file_size: int,
+        timestamp: datetime,
+        peer_id: str | None,
+        transfer_id: str,
+    ) -> None:
+        ts = timestamp.astimezone(timezone.utc).strftime("%H:%M:%S")
+        record = {
+            "content": saved_path,
+            "attachment_name": file_name,
+            "attachment_mime": mime_type,
+            "attachment_size_bytes": file_size,
+        }
+        message_store.append(
+            direction="inbound",
+            sender=sender,
+            content=saved_path,
+            timestamp=timestamp,
+            peer_id=peer_id,
+            message_id=transfer_id,
+            conversation_id=_MESH_CONVERSATION_ID,
+            message_kind="public_file",
+            attachment_name=file_name,
+            attachment_mime=mime_type,
+            attachment_size_bytes=file_size,
+        )
+        print(f"\n[{ts}] <{sender}> {_attachment_summary(record)}", flush=True)
+
+    def private_file_log(
+        sender: str,
+        saved_path: str,
+        file_name: str,
+        mime_type: str,
+        file_size: int,
+        timestamp: datetime,
+        peer_id: str,
+        transfer_id: str,
+    ) -> None:
+        ts = timestamp.astimezone(timezone.utc).strftime("%H:%M:%S")
+        record = {
+            "content": saved_path,
+            "attachment_name": file_name,
+            "attachment_mime": mime_type,
+            "attachment_size_bytes": file_size,
+        }
+        message_store.append(
+            direction="inbound",
+            sender=sender,
+            content=saved_path,
+            timestamp=timestamp,
+            peer_id=peer_id,
+            message_id=transfer_id,
+            scope="dm",
+            conversation_id=peer_id,
+            message_kind="private_file",
+            attachment_name=file_name,
+            attachment_mime=mime_type,
+            attachment_size_bytes=file_size,
+        )
+        print(f"\n[{ts}] [dm] <{sender}> {_attachment_summary(record)}", flush=True)
+
     try:
         transport = _build_transport(
             identity=state.identity,
@@ -442,8 +533,11 @@ async def run_chat(args: argparse.Namespace) -> int:
             peer_log=peer_log,
             private_message_log=private_message_log,
             receipt_log=receipt_log,
+            public_file_log=public_file_log,
+            private_file_log=private_file_log,
             scan_interval=args.scan_interval,
             background_mode=False,
+            file_runtime_paths=runtime,
         )
         transport_ref["value"] = transport
         transport.seed_known_peers(peer_store.read_all())
@@ -553,12 +647,14 @@ def run_selftest(_args: argparse.Namespace) -> int:
     from .noise import XXHandshake
     from .protocol import (
         Announcement,
+        FilePacket,
         NoisePayload,
         NoisePayloadType,
         Packet,
         PrivateMessagePacket,
         make_announce_packet,
         make_delivered_payload,
+        make_file_transfer_packet,
         make_public_message_packet,
         make_read_receipt_payload,
     )
@@ -602,6 +698,20 @@ def run_selftest(_args: argparse.Namespace) -> int:
     private_message = PrivateMessagePacket(message_id="m-1", content="hello")
     decoded_private_message = PrivateMessagePacket.decode(private_message.encode())
     assert decoded_private_message == private_message
+
+    file_packet = FilePacket(
+        file_name="note.txt",
+        file_size=5,
+        mime_type="text/plain",
+        content=b"hello",
+    )
+    decoded_file_packet = FilePacket.decode(file_packet.encode())
+    assert decoded_file_packet == file_packet
+    decoded_file_transfer = Packet.decode(
+        make_file_transfer_packet(identity, file_packet, timestamp_ms=1_700_000_000_000).encode(padding=False)
+    )
+    assert decoded_file_transfer.version == 2
+    assert FilePacket.decode(decoded_file_transfer.payload) == file_packet
 
     private_payload = NoisePayload(
         payload_type=NoisePayloadType.PRIVATE_MESSAGE,
@@ -706,6 +816,77 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                 flush=True,
             )
 
+        def daemon_public_file_log(
+            sender: str,
+            saved_path: str,
+            file_name: str,
+            mime_type: str,
+            file_size: int,
+            timestamp: datetime,
+            peer_id: str | None,
+            transfer_id: str,
+        ) -> None:
+            record = {
+                "content": saved_path,
+                "attachment_name": file_name,
+                "attachment_mime": mime_type,
+                "attachment_size_bytes": file_size,
+            }
+            message_store.append(
+                direction="inbound",
+                sender=sender,
+                content=saved_path,
+                timestamp=timestamp,
+                peer_id=peer_id,
+                message_id=transfer_id,
+                conversation_id=_MESH_CONVERSATION_ID,
+                message_kind="public_file",
+                attachment_name=file_name,
+                attachment_mime=mime_type,
+                attachment_size_bytes=file_size,
+            )
+            print(
+                f"{timestamp.astimezone(timezone.utc).isoformat()} <{sender}> {_attachment_summary(record)}",
+                file=log_handle,
+                flush=True,
+            )
+
+        def daemon_private_file_log(
+            sender: str,
+            saved_path: str,
+            file_name: str,
+            mime_type: str,
+            file_size: int,
+            timestamp: datetime,
+            peer_id: str,
+            transfer_id: str,
+        ) -> None:
+            record = {
+                "content": saved_path,
+                "attachment_name": file_name,
+                "attachment_mime": mime_type,
+                "attachment_size_bytes": file_size,
+            }
+            message_store.append(
+                direction="inbound",
+                sender=sender,
+                content=saved_path,
+                timestamp=timestamp,
+                peer_id=peer_id,
+                message_id=transfer_id,
+                scope="dm",
+                conversation_id=peer_id,
+                message_kind="private_file",
+                attachment_name=file_name,
+                attachment_mime=mime_type,
+                attachment_size_bytes=file_size,
+            )
+            print(
+                f"{timestamp.astimezone(timezone.utc).isoformat()} [dm] <{sender}> {_attachment_summary(record)}",
+                file=log_handle,
+                flush=True,
+            )
+
         def daemon_geohash_message_log(event: dict[str, object]) -> None:
             _record_geohash_event(event, message_store=message_store, log_handle=log_handle)
 
@@ -760,6 +941,31 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                             delivery_state="pending",
                         )
                         response = {"ok": True, "message_id": message_id}
+                elif command == "dm_send_file":
+                    peer_id = str(payload.get("peer_id") or "")
+                    raw_path = str(payload.get("path") or "")
+                    if not peer_id or not raw_path:
+                        response = {"ok": False, "error": "missing peer_id or path"}
+                    else:
+                        outgoing = load_outgoing_file(Path(raw_path))
+                        transfer_id = await transport.send_private_file(peer_id, Path(raw_path))
+                        message_store.append(
+                            direction="outbound",
+                            sender=state.nickname,
+                            content=str(Path(raw_path).expanduser().resolve()),
+                            timestamp=datetime.now(timezone.utc),
+                            peer_id=peer_id,
+                            message_id=transfer_id,
+                            scope="dm",
+                            conversation_id=peer_id,
+                            message_kind="private_file",
+                            target_peer_id=peer_id,
+                            delivery_state="pending",
+                            attachment_name=outgoing.file_name,
+                            attachment_mime=outgoing.mime_type,
+                            attachment_size_bytes=outgoing.file_size,
+                        )
+                        response = {"ok": True, "transfer_id": transfer_id}
                 elif command == "public_send":
                     content = str(payload.get("content") or "")
                     if not content:
@@ -776,6 +982,27 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                             conversation_id=_MESH_CONVERSATION_ID,
                         )
                         response = {"ok": True}
+                elif command == "public_send_file":
+                    raw_path = str(payload.get("path") or "")
+                    if not raw_path:
+                        response = {"ok": False, "error": "missing path"}
+                    else:
+                        outgoing = load_outgoing_file(Path(raw_path))
+                        transfer_id = await transport.send_public_file(Path(raw_path))
+                        message_store.append(
+                            direction="outbound",
+                            sender=state.nickname,
+                            content=str(Path(raw_path).expanduser().resolve()),
+                            timestamp=datetime.now(timezone.utc),
+                            peer_id=state.identity.peer_id,
+                            message_id=transfer_id,
+                            conversation_id=_MESH_CONVERSATION_ID,
+                            message_kind="public_file",
+                            attachment_name=outgoing.file_name,
+                            attachment_mime=outgoing.mime_type,
+                            attachment_size_bytes=outgoing.file_size,
+                        )
+                        response = {"ok": True, "transfer_id": transfer_id}
                 elif command == "geo_send":
                     geohash = str(payload.get("geohash") or "")
                     content = str(payload.get("content") or "")
@@ -882,8 +1109,11 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
             peer_log=daemon_peer_log,
             private_message_log=daemon_private_message_log,
             receipt_log=daemon_receipt_log,
+            public_file_log=daemon_public_file_log,
+            private_file_log=daemon_private_file_log,
             scan_interval=args.scan_interval,
             background_mode=True,
+            file_runtime_paths=runtime,
         )
         transport_ref["value"] = transport
         transport.seed_known_peers(peer_store.read_all())
@@ -1145,7 +1375,11 @@ def run_inbox(args: argparse.Namespace) -> int:
     for row in records:
         timestamp = row["timestamp"]
         sender = row["sender"]
-        content = row["content"]
+        content = (
+            _attachment_summary(row)
+            if str(row.get("message_kind") or "") in {"public_file", "private_file"}
+            else row["content"]
+        )
         print(f"{timestamp} #mesh <{sender}> {content}")
     return 0
 
@@ -1248,6 +1482,30 @@ def run_dm_send(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_dm_send_file(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    peer_rows = PeerStore(runtime.peers_path).read_all()
+    try:
+        peer = _resolve_peer_record(peer_rows, args.target)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+    try:
+        response = _send_daemon_command(
+            runtime,
+            {
+                "command": "dm_send_file",
+                "peer_id": str(peer["peer_id"]),
+                "path": args.path,
+            },
+        )
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
+    print(f"queued file {response['transfer_id']} to {peer['nickname']} ({peer['peer_id']})")
+    return 0
+
+
 def run_send(args: argparse.Namespace) -> int:
     runtime = RuntimePaths()
     try:
@@ -1262,6 +1520,23 @@ def run_send(args: argparse.Namespace) -> int:
         print(str(exc))
         return 1
     print("queued public message")
+    return 0
+
+
+def run_send_file(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    try:
+        response = _send_daemon_command(
+            runtime,
+            {
+                "command": "public_send_file",
+                "path": args.path,
+            },
+        )
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
+    print(f"queued public file {response['transfer_id']}")
     return 0
 
 
@@ -1371,6 +1646,8 @@ def run_dm_inbox(args: argparse.Namespace) -> int:
             summary["last_timestamp"] = timestamp
             if row.get("message_kind") == "private_message":
                 summary["last_preview"] = str(row.get("content") or "")
+            elif row.get("message_kind") in {"public_file", "private_file"}:
+                summary["last_preview"] = _attachment_summary(row)
             else:
                 summary["last_preview"] = str(row.get("content") or row.get("message_kind") or "")
 
@@ -1422,7 +1699,12 @@ def run_dm_history(args: argparse.Namespace) -> int:
                 f"{row['timestamp']} [receipt] {row['content']} {row['message_id']}"
             )
             continue
-        print(f"{row['timestamp']} <{row['sender']}> {row['content']}")
+        content = (
+            _attachment_summary(row)
+            if str(row.get("message_kind") or "") in {"public_file", "private_file"}
+            else row["content"]
+        )
+        print(f"{row['timestamp']} <{row['sender']}> {content}")
     pending_read_receipts = _pending_read_receipt_ids(rows, conversation_id)
     if pending_read_receipts:
         try:

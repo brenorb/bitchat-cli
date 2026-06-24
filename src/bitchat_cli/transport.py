@@ -5,6 +5,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable
 from uuid import uuid4
 
@@ -13,15 +14,18 @@ from bleak import BleakClient, BleakScanner
 from .constants import CHARACTERISTIC_UUID, MAX_PACKET_SIZE, SERVICE_UUID, MessageType
 from .crypto import Identity, peer_id_from_noise_public_key
 from .dedupe import ExpiringSet, packet_cache_key
+from .files import load_outgoing_file, save_incoming_file, transfer_id_for_bytes
 from .fragments import FragmentAssemblyBuffer, fragment_packet_sequence
 from .noise import NoiseError, NoiseSession
 from .peripheral import NullPeripheralEndpoint, PeripheralEndpoint
 from .protocol import (
     Announcement,
+    FilePacket,
     NoisePayload,
     NoisePayloadType,
     Packet,
     PrivateMessagePacket,
+    make_file_transfer_packet,
     make_announce_packet,
     make_delivered_payload,
     make_leave_packet,
@@ -30,6 +34,7 @@ from .protocol import (
     make_public_message_packet,
     make_read_receipt_payload,
 )
+from .state import RuntimePaths
 from .sync import GCSFilter, RequestSyncManager, RequestSyncPacket, SyncTypeFlags, packet_sync_id
 
 
@@ -38,6 +43,8 @@ MessageLogger = Callable[[str, str, datetime, str | None, str | None], None]
 PeerLogger = Callable[["PeerRecord"], None]
 PrivateMessageLogger = Callable[[str, str, datetime, str, str], None]
 ReceiptLogger = Callable[[str, str, str, datetime], None]
+PublicFileLogger = Callable[[str, str, str, str, int, datetime, str | None, str], None]
+PrivateFileLogger = Callable[[str, str, str, str, int, datetime, str, str], None]
 
 _MAX_PENDING_NOISE_PAYLOADS_PER_PEER = 32
 _MAX_NOTIFICATION_QUEUE_SIZE = 256
@@ -85,9 +92,12 @@ class BLEChatTransport:
         peer_log: PeerLogger | None = None,
         private_message_log: PrivateMessageLogger | None = None,
         receipt_log: ReceiptLogger | None = None,
+        public_file_log: PublicFileLogger | None = None,
+        private_file_log: PrivateFileLogger | None = None,
         scan_interval: float = 5.0,
         background_mode: bool = False,
         peripheral_endpoint: PeripheralEndpoint | None = None,
+        file_runtime_paths: RuntimePaths | None = None,
     ) -> None:
         self.identity = identity
         self.nickname = nickname
@@ -96,9 +106,12 @@ class BLEChatTransport:
         self.peer_log = peer_log
         self.private_message_log = private_message_log
         self.receipt_log = receipt_log
+        self.public_file_log = public_file_log
+        self.private_file_log = private_file_log
         self.scan_interval = scan_interval
         self.background_mode = background_mode
         self.peripheral_endpoint = peripheral_endpoint or NullPeripheralEndpoint()
+        self.file_runtime_paths = file_runtime_paths or RuntimePaths()
         self.clients: dict[str, BleakClient] = {}
         self.connecting: set[str] = set()
         self.known_peers: dict[str, PeerRecord] = {}
@@ -234,6 +247,14 @@ class BLEChatTransport:
         self._remember_sync_packet(packet)
         await self._broadcast_packet(packet)
 
+    async def send_public_file(self, path: Path) -> str:
+        file_packet = load_outgoing_file(path)
+        transfer_id = transfer_id_for_bytes(file_packet.encode())
+        packet = make_file_transfer_packet(self.identity, file_packet)
+        self._remember_sync_packet(packet)
+        await self._broadcast_packet(packet)
+        return transfer_id
+
     async def send_request_sync(
         self,
         peer_id: str,
@@ -275,6 +296,19 @@ class BLEChatTransport:
         ).encode()
         await self._send_noise_payload(peer_id, typed_payload)
         return resolved_message_id
+
+    async def send_private_file(self, peer_id: str, path: Path) -> str:
+        if peer_id not in self.known_peers:
+            raise ValueError(f"unknown peer_id: {peer_id}")
+        file_packet = load_outgoing_file(path)
+        encoded = file_packet.encode()
+        transfer_id = transfer_id_for_bytes(encoded)
+        typed_payload = NoisePayload(
+            payload_type=NoisePayloadType.FILE_TRANSFER,
+            payload=encoded,
+        ).encode()
+        await self._send_noise_payload(peer_id, typed_payload)
+        return transfer_id
 
     async def send_read_receipt(self, peer_id: str, message_id: str) -> None:
         if peer_id not in self.known_peers:
@@ -507,6 +541,9 @@ class BLEChatTransport:
         if packet.packet_type == MessageType.MESSAGE:
             await self._handle_message(packet)
             return
+        if packet.packet_type == MessageType.FILE_TRANSFER:
+            await self._handle_file_transfer(packet)
+            return
         if packet.packet_type == MessageType.NOISE_HANDSHAKE:
             await self._handle_noise_handshake(packet)
             return
@@ -532,6 +569,7 @@ class BLEChatTransport:
         relayable_types = {
             MessageType.ANNOUNCE,
             MessageType.MESSAGE,
+            MessageType.FILE_TRANSFER,
             MessageType.LEAVE,
             MessageType.NOISE_HANDSHAKE,
             MessageType.NOISE_ENCRYPTED,
@@ -577,7 +615,7 @@ class BLEChatTransport:
             )
 
         packet_age_seconds = (current - packet_ts).total_seconds()
-        if packet.packet_type in {MessageType.ANNOUNCE, MessageType.MESSAGE} and (
+        if packet.packet_type in {MessageType.ANNOUNCE, MessageType.MESSAGE, MessageType.FILE_TRANSFER} and (
             packet.recipient_id is None or packet.packet_type == MessageType.ANNOUNCE
         ):
             if packet_age_seconds > _MAX_BROADCAST_PACKET_AGE_SECONDS:
@@ -688,6 +726,52 @@ class BLEChatTransport:
         self._remember_sync_packet(packet)
         self.message_log(sender_nickname, content, timestamp, peer_id, message_id)
 
+    async def _handle_file_transfer(self, packet: Packet) -> None:
+        peer_id = packet.sender_id.hex()
+        peer = self.known_peers.get(peer_id)
+        sender_nickname: str
+        sender_key: bytes
+        if peer_id == self.identity.peer_id:
+            sender_nickname = self.nickname
+            sender_key = self.identity.signing_public_key
+        else:
+            if peer is None:
+                return
+            sender_nickname = peer.nickname
+            sender_key = peer.signing_public_key
+        if not packet.verify_signature(sender_key):
+            self.system_log(f"Ignored file transfer from {sender_nickname}: invalid signature.")
+            return
+        transfer_id = transfer_id_for_bytes(packet.payload)
+        dedupe_key = f"file:{peer_id}:{transfer_id}"
+        if self._recent_inbound_messages.mark_seen(dedupe_key):
+            return
+        try:
+            file_packet = FilePacket.decode(packet.payload)
+        except ValueError as exc:
+            self.system_log(f"Ignored invalid file transfer from {sender_nickname}: {exc}")
+            return
+        saved_path = save_incoming_file(self.file_runtime_paths, file_packet)
+        timestamp = datetime.fromtimestamp(packet.timestamp_ms / 1000, tz=timezone.utc)
+        if peer is not None:
+            peer.last_seen = timestamp
+        self._remember_sync_packet(packet)
+        if self.public_file_log is not None:
+            self.public_file_log(
+                sender_nickname,
+                str(saved_path),
+                file_packet.file_name,
+                file_packet.mime_type,
+                file_packet.file_size,
+                timestamp,
+                peer_id,
+                transfer_id,
+            )
+            return
+        self.system_log(
+            f"[file] <{sender_nickname}> {file_packet.file_name} ({file_packet.file_size} bytes) -> {saved_path}"
+        )
+
     async def _handle_request_sync(self, packet: Packet) -> None:
         if packet.recipient_id is not None and packet.recipient_id.hex() != self.identity.peer_id:
             return
@@ -787,6 +871,9 @@ class BLEChatTransport:
         if noise_payload.payload_type == NoisePayloadType.PRIVATE_MESSAGE:
             await self._handle_private_message_payload(peer_id, noise_payload.payload, timestamp)
             return
+        if noise_payload.payload_type == NoisePayloadType.FILE_TRANSFER:
+            await self._handle_private_file_payload(peer_id, noise_payload.payload, timestamp)
+            return
         if noise_payload.payload_type == NoisePayloadType.DELIVERED:
             self._handle_receipt_payload(peer_id, "delivered", noise_payload.payload, timestamp)
             return
@@ -823,6 +910,43 @@ class BLEChatTransport:
             self.system_log(f"[dm] <{sender}> {private_message.content}")
 
         await self._send_noise_payload(peer_id, make_delivered_payload(private_message.message_id))
+
+    async def _handle_private_file_payload(
+        self,
+        peer_id: str,
+        payload: bytes,
+        timestamp: datetime,
+    ) -> None:
+        try:
+            file_packet = FilePacket.decode(payload)
+        except ValueError as exc:
+            self.system_log(f"Ignored invalid private file from {peer_id}: {exc}")
+            return
+        transfer_id = transfer_id_for_bytes(payload)
+        dedupe_key = f"dm-file:{peer_id}:{transfer_id}"
+        if self._recent_inbound_messages.mark_seen(dedupe_key):
+            return
+
+        peer = self.known_peers.get(peer_id)
+        sender = peer.nickname if peer is not None else peer_id[:8]
+        saved_path = save_incoming_file(self.file_runtime_paths, file_packet)
+        if self.private_file_log is not None:
+            self.private_file_log(
+                sender,
+                str(saved_path),
+                file_packet.file_name,
+                file_packet.mime_type,
+                file_packet.file_size,
+                timestamp,
+                peer_id,
+                transfer_id,
+            )
+        else:
+            self.system_log(
+                f"[dm-file] <{sender}> {file_packet.file_name} ({file_packet.file_size} bytes) -> {saved_path}"
+            )
+
+        await self._send_noise_payload(peer_id, make_delivered_payload(transfer_id))
 
     def _handle_receipt_payload(
         self,

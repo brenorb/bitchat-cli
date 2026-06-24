@@ -22,6 +22,7 @@ def test_doctor_payload_reports_mesh_relay_support(tmp_path: Path, monkeypatch) 
     assert payload["scope"]["mesh_relay"] is True
     assert payload["scope"]["local_sync"] is True
     assert payload["scope"]["ble_peripheral"] is False
+    assert payload["scope"]["file_transfer"] is True
 
 
 class FakePeripheralEndpoint(NullPeripheralEndpoint):
@@ -295,6 +296,35 @@ def test_run_inbox_limits_public_view_to_mesh_conversation(tmp_path: Path, monke
     assert "mesh hello" in captured.out
     assert "legacy hello" in captured.out
     assert "other channel" not in captured.out
+
+
+def test_run_inbox_formats_public_file_records(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    store = MessageStore(runtime.inbox_path)
+    timestamp = datetime(2026, 6, 24, 0, 9, 44, tzinfo=timezone.utc)
+    store.append(
+        direction="inbound",
+        sender="bubbles",
+        content=str(runtime.incoming_images_dir / "photo.jpg"),
+        timestamp=timestamp,
+        peer_id="abcd",
+        message_id="file-1",
+        scope="public",
+        conversation_id="mesh",
+        message_kind="public_file",
+        attachment_name="photo.jpg",
+        attachment_mime="image/jpeg",
+        attachment_size_bytes=2048,
+    )
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+
+    exit_code = app.run_inbox(argparse.Namespace(json=False, tail=None))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "[image]" in captured.out
+    assert "photo.jpg" in captured.out
+    assert "2.0 KB" in captured.out
 
 
 def test_run_geo_inbox_filters_to_requested_geohash(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -650,6 +680,43 @@ def test_run_dm_history_filters_one_conversation(tmp_path: Path, monkeypatch, ca
     assert "for bubbles" not in captured.out
 
 
+def test_run_dm_history_formats_private_file_records(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    peer = Identity.generate()
+    PeerStore(runtime.peers_path).upsert(
+        peer_id=peer.peer_id,
+        nickname="bubbles",
+        noise_public_key=peer.noise_public_key,
+        signing_public_key=peer.signing_public_key,
+        addresses={"B1"},
+        last_seen=datetime(2026, 6, 24, 0, 9, 45, tzinfo=timezone.utc),
+    )
+    store = MessageStore(runtime.inbox_path)
+    store.append(
+        direction="inbound",
+        sender="bubbles",
+        content=str(runtime.incoming_files_dir / "note.txt"),
+        timestamp=datetime(2026, 6, 24, 0, 10, 1, tzinfo=timezone.utc),
+        peer_id=peer.peer_id,
+        message_id="file-1",
+        scope="dm",
+        conversation_id=peer.peer_id,
+        message_kind="private_file",
+        attachment_name="note.txt",
+        attachment_mime="text/plain",
+        attachment_size_bytes=12,
+    )
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+    monkeypatch.setattr(app, "_send_daemon_command", lambda *_args, **_kwargs: {"ok": True, "count": 0})
+
+    exit_code = app.run_dm_history(argparse.Namespace(target="@bubbles", json=False, tail=None))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "[file]" in captured.out
+    assert "note.txt" in captured.out
+
+
 def test_run_dm_send_uses_daemon_command_and_resolves_nickname(tmp_path: Path, monkeypatch, capsys) -> None:
     runtime = RuntimePaths(tmp_path)
     identity = Identity.generate()
@@ -684,6 +751,40 @@ def test_run_dm_send_uses_daemon_command_and_resolves_nickname(tmp_path: Path, m
     assert "dm-1" in captured.out
 
 
+def test_run_dm_send_file_uses_daemon_command_and_resolves_nickname(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    identity = Identity.generate()
+    PeerStore(runtime.peers_path).upsert(
+        peer_id=identity.peer_id,
+        nickname="bubbles",
+        noise_public_key=identity.noise_public_key,
+        signing_public_key=identity.signing_public_key,
+        addresses={"A1"},
+        last_seen=datetime(2026, 6, 24, 0, 9, 44, tzinfo=timezone.utc),
+    )
+    seen: list[dict[str, object]] = []
+
+    def fake_send_daemon_command(_runtime: RuntimePaths, payload: dict[str, object]) -> dict[str, object]:
+        seen.append(payload)
+        return {"ok": True, "transfer_id": "file-1"}
+
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+    monkeypatch.setattr(app, "_send_daemon_command", fake_send_daemon_command)
+
+    exit_code = app.run_dm_send_file(argparse.Namespace(target="@bubbles", path="/tmp/photo.jpg"))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert seen == [
+        {
+            "command": "dm_send_file",
+            "peer_id": identity.peer_id,
+            "path": "/tmp/photo.jpg",
+        }
+    ]
+    assert "file-1" in captured.out
+
+
 def test_run_send_uses_daemon_command(tmp_path: Path, monkeypatch, capsys) -> None:
     runtime = RuntimePaths(tmp_path)
     seen: list[dict[str, object]] = []
@@ -706,6 +807,30 @@ def test_run_send_uses_daemon_command(tmp_path: Path, monkeypatch, capsys) -> No
         }
     ]
     assert "queued public message" in captured.out
+
+
+def test_run_send_file_uses_daemon_command(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    seen: list[dict[str, object]] = []
+
+    def fake_send_daemon_command(_runtime: RuntimePaths, payload: dict[str, object]) -> dict[str, object]:
+        seen.append(payload)
+        return {"ok": True, "transfer_id": "file-1"}
+
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+    monkeypatch.setattr(app, "_send_daemon_command", fake_send_daemon_command)
+
+    exit_code = app.run_send_file(argparse.Namespace(path="/tmp/photo.jpg"))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert seen == [
+        {
+            "command": "public_send_file",
+            "path": "/tmp/photo.jpg",
+        }
+    ]
+    assert "queued public file" in captured.out
 
 
 def test_run_daemon_start_uses_repo_src_in_pythonpath(tmp_path: Path, monkeypatch, capsys) -> None:

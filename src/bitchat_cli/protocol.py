@@ -22,6 +22,7 @@ class NoisePayloadType(IntEnum):
     PRIVATE_MESSAGE = 0x01
     READ_RECEIPT = 0x02
     DELIVERED = 0x03
+    FILE_TRANSFER = 0x20
 
 
 def optimal_block_size(data_size: int) -> int:
@@ -65,8 +66,6 @@ def maybe_compress(payload: bytes) -> tuple[bytes, bool, int | None]:
         return payload, False, None
     compressed = zlib.compress(payload)
     if len(compressed) >= len(payload):
-        return payload, False, None
-    if len(payload) > 0xFFFF:
         return payload, False, None
     return compressed, True, len(payload)
 
@@ -192,6 +191,81 @@ class NoisePayload:
 
 
 @dataclass(slots=True)
+class FilePacket:
+    file_name: str
+    file_size: int
+    mime_type: str
+    content: bytes
+
+    def encode(self) -> bytes:
+        name_bytes = self.file_name.encode("utf-8")
+        mime_bytes = self.mime_type.encode("utf-8")
+        if len(name_bytes) > 0xFFFF:
+            raise ValueError("file_name too long")
+        if len(mime_bytes) > 0xFFFF:
+            raise ValueError("mime_type too long")
+        if self.file_size < 0 or self.file_size != len(self.content):
+            raise ValueError("invalid file_size")
+        return (
+            bytes([0x01])
+            + len(name_bytes).to_bytes(2, "big")
+            + name_bytes
+            + bytes([0x02, 0x00, 0x04])
+            + self.file_size.to_bytes(4, "big")
+            + bytes([0x03])
+            + len(mime_bytes).to_bytes(2, "big")
+            + mime_bytes
+            + bytes([0x04])
+            + len(self.content).to_bytes(4, "big")
+            + self.content
+        )
+
+    @classmethod
+    def decode(cls, data: bytes) -> "FilePacket":
+        file_name: str | None = None
+        file_size: int | None = None
+        mime_type: str | None = None
+        content_parts: list[bytes] = []
+        offset = 0
+        while offset < len(data):
+            tlv_type = data[offset]
+            offset += 1
+            if tlv_type == 0x04:
+                if offset + 4 > len(data):
+                    raise ValueError("truncated content length")
+                length = int.from_bytes(data[offset : offset + 4], "big")
+                offset += 4
+            else:
+                if offset + 2 > len(data):
+                    raise ValueError("truncated tlv length")
+                length = int.from_bytes(data[offset : offset + 2], "big")
+                offset += 2
+            if offset + length > len(data):
+                raise ValueError("truncated tlv value")
+            value = data[offset : offset + length]
+            offset += length
+            if tlv_type == 0x01:
+                file_name = value.decode("utf-8")
+            elif tlv_type == 0x02:
+                if length != 4:
+                    raise ValueError("invalid file size field")
+                file_size = int.from_bytes(value, "big")
+            elif tlv_type == 0x03:
+                mime_type = value.decode("utf-8")
+            elif tlv_type == 0x04:
+                content_parts.append(value)
+            else:
+                raise ValueError("unknown file packet tlv")
+        if file_name is None or mime_type is None or not content_parts:
+            raise ValueError("file packet missing required fields")
+        content = b"".join(content_parts)
+        declared_size = file_size if file_size is not None else len(content)
+        if declared_size != len(content):
+            raise ValueError("file size mismatch")
+        return cls(file_name=file_name, file_size=declared_size, mime_type=mime_type, content=content)
+
+
+@dataclass(slots=True)
 class Packet:
     packet_type: int
     sender_id: bytes
@@ -204,8 +278,8 @@ class Packet:
     is_rsr: bool = False
 
     def encode(self, *, padding: bool = False) -> bytes:
-        if self.version != 1:
-            raise ValueError("only protocol v1 is supported")
+        if self.version not in (1, 2):
+            raise ValueError("unsupported version")
         if len(self.sender_id) != 8:
             raise ValueError("sender_id must be 8 bytes")
         if self.recipient_id is not None and len(self.recipient_id) != 8:
@@ -224,7 +298,10 @@ class Packet:
 
         payload_bytes = payload
         if is_compressed and original_size is not None:
-            payload_bytes = original_size.to_bytes(2, "big") + payload
+            size_width = 4 if self.version >= 2 else 2
+            if self.version == 1 and original_size > 0xFFFF:
+                raise ValueError("compressed payload too large for v1")
+            payload_bytes = original_size.to_bytes(size_width, "big") + payload
 
         header = bytearray()
         header.append(self.version)
@@ -232,7 +309,10 @@ class Packet:
         header.append(self.ttl & 0xFF)
         header.extend(int(self.timestamp_ms).to_bytes(8, "big"))
         header.append(flags)
-        header.extend(len(payload_bytes).to_bytes(2, "big"))
+        length_width = 4 if self.version >= 2 else 2
+        if self.version == 1 and len(payload_bytes) > 0xFFFF:
+            raise ValueError("payload too large for v1")
+        header.extend(len(payload_bytes).to_bytes(length_width, "big"))
 
         body = bytearray(header)
         body.extend(self.sender_id)
@@ -287,14 +367,18 @@ class Packet:
         if len(raw) < 22:
             raise ValueError("packet too short")
         version = raw[0]
-        if version != 1:
+        if version not in (1, 2):
             raise ValueError("unsupported version")
         packet_type = raw[1]
         ttl = raw[2]
         timestamp_ms = int.from_bytes(raw[3:11], "big")
         flags = raw[11]
-        payload_length = int.from_bytes(raw[12:14], "big")
-        offset = 14
+        if version >= 2:
+            payload_length = int.from_bytes(raw[12:16], "big")
+            offset = 16
+        else:
+            payload_length = int.from_bytes(raw[12:14], "big")
+            offset = 14
 
         sender_id = raw[offset : offset + 8]
         if len(sender_id) != 8:
@@ -322,10 +406,11 @@ class Packet:
 
         payload = payload_blob
         if flags & FLAG_IS_COMPRESSED:
-            if len(payload_blob) < 2:
+            size_width = 4 if version >= 2 else 2
+            if len(payload_blob) < size_width:
                 raise ValueError("compressed payload missing original size")
-            original_size = int.from_bytes(payload_blob[:2], "big")
-            payload = zlib.decompress(payload_blob[2:])
+            original_size = int.from_bytes(payload_blob[:size_width], "big")
+            payload = zlib.decompress(payload_blob[size_width:])
             if len(payload) != original_size:
                 raise ValueError("decompressed payload size mismatch")
 
@@ -347,6 +432,17 @@ def make_public_message_packet(identity: Identity, content: str, *, timestamp_ms
         packet_type=MessageType.MESSAGE,
         sender_id=bytes.fromhex(identity.peer_id),
         payload=content.encode("utf-8"),
+        timestamp_ms=timestamp_ms or int(time.time() * 1000),
+    )
+    return packet.sign(identity)
+
+
+def make_file_transfer_packet(identity: Identity, file_packet: FilePacket, *, timestamp_ms: int | None = None) -> Packet:
+    packet = Packet(
+        version=2,
+        packet_type=MessageType.FILE_TRANSFER,
+        sender_id=bytes.fromhex(identity.peer_id),
+        payload=file_packet.encode(),
         timestamp_ms=timestamp_ms or int(time.time() * 1000),
     )
     return packet.sign(identity)
@@ -422,6 +518,7 @@ def make_noise_encrypted_packet(
     timestamp_ms: int | None = None,
 ) -> Packet:
     return Packet(
+        version=2 if len(payload) > 0xFFFF else 1,
         packet_type=MessageType.NOISE_ENCRYPTED,
         sender_id=bytes.fromhex(identity.peer_id),
         recipient_id=bytes.fromhex(recipient_peer_id),

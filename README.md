@@ -15,6 +15,7 @@ Current scope:
 - macOS BLE peripheral advertising and subscriber writes for app-to-CLI reachability
 - Inbound fragment reassembly and outbound packet fragmentation for oversized BLE payloads
 - Direct BLE private messaging over Noise XX with lazy handshake
+- Public and DM file/image transfer with inbound persistence under `~/.config/bitchat-cli/{files,images}/incoming`
 - Official Noise XX session primitives validated against the macOS app's test vectors
 - Duplicate-safe multi-hop relay for public traffic and directed Noise packets
 - Local public-message and fragment sync over `REQUEST_SYNC` with official-style `RSR` responses
@@ -23,7 +24,6 @@ Current scope:
 
 Still not implemented:
 
-- File transfer
 - Presence counts and the full location-channel sheet model from the app UI
 - Nostr private messaging outside the Bluetooth mesh path
 
@@ -66,6 +66,9 @@ uv run bitchat peers
 uv run bitchat inbox --tail 20
 uv run bitchat mesh inbox --tail 20
 uv run bitchat dm send @bubbles "hello from daemon"
+uv run bitchat send-file ./photo.jpg
+uv run bitchat mesh send-file ./photo.jpg
+uv run bitchat dm send-file @bubbles ./photo.jpg
 uv run bitchat dm inbox
 uv run bitchat dm history @bubbles
 uv run bitchat daemon stop
@@ -78,6 +81,8 @@ Daemon artifacts live under `~/.config/bitchat-cli/`:
 - `messages.jsonl` - recorded message history
 - `peers.json` - known peers learned from signed announce packets, keeping the
   latest observed address set per peer instead of a growing historical archive
+- `files/incoming` - inbound non-image transfers
+- `images/incoming` - inbound image transfers
 - `daemon.pid` - running daemon pid
 - `radio.pid` - active BLE session guard
 
@@ -136,6 +141,9 @@ Behavior notes:
 - `send` queues a public channel message through the running daemon, so you can
   test outbound delivery without stopping the background listener to open
   interactive `chat`.
+- `send-file`, `mesh send-file`, and `dm send-file` use the official file TLV
+  shape and persist inbound transfers with attachment metadata so `inbox`,
+  `dm inbox`, and `dm history` can render them as files instead of raw paths.
 - The transport relays signed public packets, oversized packet fragments, and
   directed Noise handshakes/encrypted payloads across connected peers with TTL
   decrement and loop suppression.
@@ -155,8 +163,8 @@ Behavior notes:
   answer `REQUEST_SYNC` packets with cached announces, public messages, and
   oversized-packet fragments, marking solicited replay packets with the
   official `RSR` wire flag.
-- Unsupported sync types such as file transfer are filtered out locally until
-  the CLI grows the matching feature surface.
+- Request-sync replay still excludes file transfers, even though live
+  send/receive is now implemented.
 - The CLI validates `RSR` catch-up packets against the peer that answered the
   sync request, including replayed public messages originally authored by this
   device.
