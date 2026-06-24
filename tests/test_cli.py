@@ -80,6 +80,16 @@ def test_geo_encode_parser_routes_to_geo_encode_handler() -> None:
     assert args.all_levels is True
 
 
+def test_geo_lookup_parser_routes_to_geo_lookup_handler() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["geo", "lookup", "Sao Paulo", "--limit", "3"])
+
+    assert args.handler is app.run_geo_lookup
+    assert args.query == "Sao Paulo"
+    assert args.limit == 3
+
+
 def test_social_link_parser_routes_to_social_link_handler() -> None:
     parser = cli.build_parser()
 

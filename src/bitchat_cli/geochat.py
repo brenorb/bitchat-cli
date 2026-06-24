@@ -398,7 +398,6 @@ def _download_relay_csv(*, network_config: NetworkConfig | None = None) -> str:
         proxy_mode="disabled",
         proxy_url=None,
         proxy_policy="prefer",
-        geo_lookup_provider="nominatim",
     )
     try:
         with config.make_http_client(user_agent="bitchat-cli georelays/1") as client:
@@ -464,7 +463,6 @@ class GeoChatDaemon:
             proxy_mode="disabled",
             proxy_url=None,
             proxy_policy="prefer",
-            geo_lookup_provider="nominatim",
         )
         self.presence_interval_range_seconds = presence_interval_range_seconds
         self.presence_step_delay_range_seconds = presence_step_delay_range_seconds
@@ -664,11 +662,8 @@ def lookup_place(
     query: str,
     *,
     network_config: NetworkConfig,
-    provider: str = "nominatim",
     limit: int = 5,
 ) -> list[dict[str, object]]:
-    if provider != "nominatim":
-        raise ValueError("unsupported provider")
     with network_config.make_http_client(user_agent="bitchat-cli geolookup/1") as client:
         response = client.get(
             "https://nominatim.openstreetmap.org/search",

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+from bitchat_cli import state as state_module
 from bitchat_cli.crypto import Identity
 from bitchat_cli.state import ActiveSessionLease, MessageStore, PeerStore, RuntimePaths, StateStore, pid_is_running
 
@@ -18,6 +19,29 @@ def test_runtime_paths_are_stable(tmp_path: Path) -> None:
     assert paths.georelays_cache_path == tmp_path / "georelays_cache.csv"
     assert paths.incoming_files_dir == tmp_path / "files" / "incoming"
     assert paths.incoming_images_dir == tmp_path / "images" / "incoming"
+
+
+def test_default_app_dir_prefers_legacy_when_only_legacy_has_state(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(state_module.Path, "home", lambda: tmp_path)
+    preferred = tmp_path / ".config" / "bitchat"
+    legacy = tmp_path / ".config" / "bitchat-cli"
+    preferred.mkdir(parents=True)
+    legacy.mkdir(parents=True)
+    (legacy / "state.json").write_text("{}", encoding="utf-8")
+
+    assert state_module.default_app_dir() == legacy
+
+
+def test_default_app_dir_prefers_new_path_when_new_path_has_artifacts(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(state_module.Path, "home", lambda: tmp_path)
+    preferred = tmp_path / ".config" / "bitchat"
+    legacy = tmp_path / ".config" / "bitchat-cli"
+    preferred.mkdir(parents=True)
+    legacy.mkdir(parents=True)
+    (legacy / "state.json").write_text("{}", encoding="utf-8")
+    (preferred / "state.json").write_text("{}", encoding="utf-8")
+
+    assert state_module.default_app_dir() == preferred
 
 
 def test_message_store_round_trip(tmp_path: Path) -> None:

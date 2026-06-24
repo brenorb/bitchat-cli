@@ -21,7 +21,6 @@ class NetworkConfig:
     proxy_mode: str
     proxy_url: str | None
     proxy_policy: str
-    geo_lookup_provider: str
 
     @classmethod
     def from_state(cls, state: AppState) -> "NetworkConfig":
@@ -29,18 +28,10 @@ class NetworkConfig:
             proxy_mode=state.network_proxy_mode,
             proxy_url=state.network_proxy_url,
             proxy_policy=state.network_proxy_policy,
-            geo_lookup_provider=state.geo_lookup_provider,
         )
 
     def requires_proxy(self) -> bool:
         return self.proxy_policy == "require"
-
-    def websocket_proxy(self) -> str | None:
-        if self.proxy_mode == "custom":
-            return self.proxy_url
-        if self.proxy_mode == "disabled":
-            return None
-        return None
 
     def websocket_proxy_argument(self) -> dict[str, object]:
         if self.proxy_mode == "disabled":
@@ -132,5 +123,4 @@ def proxy_status_payload(config: NetworkConfig) -> dict[str, Any]:
         "policy": config.proxy_policy,
         "target": config.redacted_proxy_target(),
         "healthy": healthy,
-        "lookup_provider": config.geo_lookup_provider,
     }

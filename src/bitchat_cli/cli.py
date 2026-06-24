@@ -156,7 +156,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     geo_lookup = geo_subparsers.add_parser("lookup", help="Resolve a place name to coordinates and geohashes")
     geo_lookup.add_argument("query", help="Free-form place query")
-    geo_lookup.add_argument("--provider", default="nominatim", help="Lookup provider, default: nominatim")
     geo_lookup.add_argument("--limit", type=int, default=5, help="Maximum number of matches to return")
     geo_lookup.add_argument("--json", action="store_true", help="Output JSON")
     geo_lookup.set_defaults(handler=run_geo_lookup)

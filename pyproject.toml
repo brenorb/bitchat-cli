@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 bitchat = "bitchat_cli.cli:main"
+bchat = "bitchat_cli.cli:main"
 
 [dependency-groups]
 dev = [

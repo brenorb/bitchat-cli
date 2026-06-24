@@ -39,6 +39,60 @@ class FakePeripheralEndpoint(NullPeripheralEndpoint):
         self.sent.append(data)
 
 
+class FakeDaemonClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.runtime_status_payload: dict[str, object] = {}
+        self.responses: dict[str, dict[str, object]] = {}
+
+    def runtime_status(self) -> dict[str, object]:
+        self.calls.append({"command": "runtime_status"})
+        return self.runtime_status_payload
+
+    def send_dm(self, *, peer_id: str, content: str) -> dict[str, object]:
+        self.calls.append({"command": "dm_send", "peer_id": peer_id, "content": content})
+        return self.responses.get("dm_send", {"message_id": "dm-1"})
+
+    def send_dm_file(self, *, peer_id: str, path: str) -> dict[str, object]:
+        self.calls.append({"command": "dm_send_file", "peer_id": peer_id, "path": path})
+        return self.responses.get("dm_send_file", {"transfer_id": "file-1"})
+
+    def send_public(self, *, content: str) -> dict[str, object]:
+        self.calls.append({"command": "public_send", "content": content})
+        return self.responses.get("public_send", {"ok": True})
+
+    def send_public_file(self, *, path: str) -> dict[str, object]:
+        self.calls.append({"command": "public_send_file", "path": path})
+        return self.responses.get("public_send_file", {"transfer_id": "file-1"})
+
+    def send_geo(
+        self,
+        *,
+        geohash: str,
+        content: str,
+        pow_difficulty: int,
+        teleported: bool,
+    ) -> dict[str, object]:
+        self.calls.append(
+            {
+                "command": "geo_send",
+                "geohash": geohash,
+                "content": content,
+                "pow_difficulty": pow_difficulty,
+                "teleported": teleported,
+            }
+        )
+        return self.responses.get("geo_send", {"message_id": "geo-1"})
+
+    def set_geo_watches(self, geohashes: list[str]) -> dict[str, object]:
+        self.calls.append({"command": "geo_watch_set", "geohashes": geohashes})
+        return self.responses.get("geo_watch_set", {"geohashes": geohashes})
+
+    def mark_dm_read(self, *, peer_id: str, message_ids: list[str]) -> dict[str, object]:
+        self.calls.append({"command": "dm_mark_read", "peer_id": peer_id, "message_ids": message_ids})
+        return self.responses.get("dm_mark_read", {"count": len(message_ids)})
+
+
 def test_build_transport_attaches_platform_peripheral_endpoint(monkeypatch) -> None:
     endpoint = FakePeripheralEndpoint()
     calls: list[tuple[str, object]] = []
@@ -366,8 +420,9 @@ def test_run_geo_inbox_filters_to_requested_geohash(tmp_path: Path, monkeypatch,
 
 def test_run_geo_watch_add_persists_normalized_geohash(tmp_path: Path, monkeypatch, capsys) -> None:
     runtime = RuntimePaths(tmp_path)
+    fake_client = FakeDaemonClient()
     monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
-    monkeypatch.setattr(app, "_send_daemon_command", lambda *_args, **_kwargs: {"ok": True})
+    monkeypatch.setattr(app, "DaemonClient", lambda _runtime: fake_client)
 
     exit_code = app.run_geo_watch_add(argparse.Namespace(geohash="#U4PrUy"))
 
@@ -444,13 +499,9 @@ def test_record_geohash_event_persists_pow_and_teleport_metadata(tmp_path: Path)
 
 def test_run_geo_send_passes_pow_difficulty_to_daemon(tmp_path: Path, monkeypatch, capsys) -> None:
     runtime = RuntimePaths(tmp_path)
-    commands: list[dict[str, object]] = []
+    fake_client = FakeDaemonClient()
     monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
-    monkeypatch.setattr(
-        app,
-        "_send_daemon_command",
-        lambda _runtime, payload: commands.append(payload) or {"ok": True, "message_id": "geo-1"},
-    )
+    monkeypatch.setattr(app, "DaemonClient", lambda _runtime: fake_client)
 
     exit_code = app.run_geo_send(
         argparse.Namespace(geohash="#U4PrUy", message="hello geo", pow=12, teleport=True)
@@ -458,7 +509,7 @@ def test_run_geo_send_passes_pow_difficulty_to_daemon(tmp_path: Path, monkeypatc
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert commands == [
+    assert fake_client.calls == [
         {
             "command": "geo_send",
             "geohash": "u4pruy",
@@ -707,7 +758,7 @@ def test_run_dm_history_formats_private_file_records(tmp_path: Path, monkeypatch
         attachment_size_bytes=12,
     )
     monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
-    monkeypatch.setattr(app, "_send_daemon_command", lambda *_args, **_kwargs: {"ok": True, "count": 0})
+    monkeypatch.setattr(app, "DaemonClient", lambda _runtime: FakeDaemonClient())
 
     exit_code = app.run_dm_history(argparse.Namespace(target="@bubbles", json=False, tail=None))
 
@@ -728,20 +779,16 @@ def test_run_dm_send_uses_daemon_command_and_resolves_nickname(tmp_path: Path, m
         addresses={"A1"},
         last_seen=datetime(2026, 6, 24, 0, 9, 44, tzinfo=timezone.utc),
     )
-    seen: list[dict[str, object]] = []
-
-    def fake_send_daemon_command(_runtime: RuntimePaths, payload: dict[str, object]) -> dict[str, object]:
-        seen.append(payload)
-        return {"ok": True, "message_id": "dm-1"}
+    fake_client = FakeDaemonClient()
 
     monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
-    monkeypatch.setattr(app, "_send_daemon_command", fake_send_daemon_command)
+    monkeypatch.setattr(app, "DaemonClient", lambda _runtime: fake_client)
 
     exit_code = app.run_dm_send(argparse.Namespace(target="@bubbles", message="hello from cli"))
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert seen == [
+    assert fake_client.calls == [
         {
             "command": "dm_send",
             "peer_id": identity.peer_id,
@@ -762,20 +809,16 @@ def test_run_dm_send_file_uses_daemon_command_and_resolves_nickname(tmp_path: Pa
         addresses={"A1"},
         last_seen=datetime(2026, 6, 24, 0, 9, 44, tzinfo=timezone.utc),
     )
-    seen: list[dict[str, object]] = []
-
-    def fake_send_daemon_command(_runtime: RuntimePaths, payload: dict[str, object]) -> dict[str, object]:
-        seen.append(payload)
-        return {"ok": True, "transfer_id": "file-1"}
+    fake_client = FakeDaemonClient()
 
     monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
-    monkeypatch.setattr(app, "_send_daemon_command", fake_send_daemon_command)
+    monkeypatch.setattr(app, "DaemonClient", lambda _runtime: fake_client)
 
     exit_code = app.run_dm_send_file(argparse.Namespace(target="@bubbles", path="/tmp/photo.jpg"))
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert seen == [
+    assert fake_client.calls == [
         {
             "command": "dm_send_file",
             "peer_id": identity.peer_id,
@@ -787,20 +830,16 @@ def test_run_dm_send_file_uses_daemon_command_and_resolves_nickname(tmp_path: Pa
 
 def test_run_send_uses_daemon_command(tmp_path: Path, monkeypatch, capsys) -> None:
     runtime = RuntimePaths(tmp_path)
-    seen: list[dict[str, object]] = []
-
-    def fake_send_daemon_command(_runtime: RuntimePaths, payload: dict[str, object]) -> dict[str, object]:
-        seen.append(payload)
-        return {"ok": True}
+    fake_client = FakeDaemonClient()
 
     monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
-    monkeypatch.setattr(app, "_send_daemon_command", fake_send_daemon_command)
+    monkeypatch.setattr(app, "DaemonClient", lambda _runtime: fake_client)
 
     exit_code = app.run_send(argparse.Namespace(message="hello #mesh"))
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert seen == [
+    assert fake_client.calls == [
         {
             "command": "public_send",
             "content": "hello #mesh",
@@ -811,20 +850,16 @@ def test_run_send_uses_daemon_command(tmp_path: Path, monkeypatch, capsys) -> No
 
 def test_run_send_file_uses_daemon_command(tmp_path: Path, monkeypatch, capsys) -> None:
     runtime = RuntimePaths(tmp_path)
-    seen: list[dict[str, object]] = []
-
-    def fake_send_daemon_command(_runtime: RuntimePaths, payload: dict[str, object]) -> dict[str, object]:
-        seen.append(payload)
-        return {"ok": True, "transfer_id": "file-1"}
+    fake_client = FakeDaemonClient()
 
     monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
-    monkeypatch.setattr(app, "_send_daemon_command", fake_send_daemon_command)
+    monkeypatch.setattr(app, "DaemonClient", lambda _runtime: fake_client)
 
     exit_code = app.run_send_file(argparse.Namespace(path="/tmp/photo.jpg"))
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert seen == [
+    assert fake_client.calls == [
         {
             "command": "public_send_file",
             "path": "/tmp/photo.jpg",
@@ -862,34 +897,28 @@ def test_run_daemon_status_includes_live_runtime_fields(tmp_path: Path, monkeypa
     runtime = RuntimePaths(tmp_path)
     runtime.root.mkdir(parents=True, exist_ok=True)
     runtime.daemon_pid_path.write_text("43210\n", encoding="utf-8")
-    seen: list[dict[str, object]] = []
-
-    def fake_send_daemon_command(_runtime: RuntimePaths, payload: dict[str, object]) -> dict[str, object]:
-        seen.append(payload)
-        return {
-            "ok": True,
-            "runtime": {
-                "connected_links": 1,
-                "known_peers": 2,
-                "peripheral_advertising": True,
-                "peripheral_subscribers": 3,
-                "peripheral_addresses": ["peripheral:B2", "peripheral:C1"],
-                "peripheral_recent_events": [
-                    {"event": "subscribe", "address": "peripheral:B2"},
-                    {"event": "write_decoded", "address": "peripheral:B2", "bytes": 23, "total_bytes": 87},
-                ],
-            },
-        }
+    fake_client = FakeDaemonClient()
+    fake_client.runtime_status_payload = {
+        "connected_links": 1,
+        "known_peers": 2,
+        "peripheral_advertising": True,
+        "peripheral_subscribers": 3,
+        "peripheral_addresses": ["peripheral:B2", "peripheral:C1"],
+        "peripheral_recent_events": [
+            {"event": "subscribe", "address": "peripheral:B2"},
+            {"event": "write_decoded", "address": "peripheral:B2", "bytes": 23, "total_bytes": 87},
+        ],
+    }
 
     monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
     monkeypatch.setattr(app, "pid_is_running", lambda _pid: True)
-    monkeypatch.setattr(app, "_send_daemon_command", fake_send_daemon_command)
+    monkeypatch.setattr(app, "DaemonClient", lambda _runtime: fake_client)
 
     exit_code = app.run_daemon_status(argparse.Namespace())
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert seen == [{"command": "runtime_status"}]
+    assert fake_client.calls == [{"command": "runtime_status"}]
     assert "connected_links: 1" in captured.out
     assert "known_peers:     2" in captured.out
     assert "peripheral_adv:  True" in captured.out
@@ -1059,14 +1088,10 @@ def test_run_dm_history_emits_read_receipts_for_unread_inbound_messages(tmp_path
         conversation_id=identity.peer_id,
         message_kind="private_message",
     )
-    seen: list[dict[str, object]] = []
-
-    def fake_send_daemon_command(_runtime: RuntimePaths, payload: dict[str, object]) -> dict[str, object]:
-        seen.append(payload)
-        return {"ok": True, "count": len(payload["message_ids"])}
+    fake_client = FakeDaemonClient()
 
     monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
-    monkeypatch.setattr(app, "_send_daemon_command", fake_send_daemon_command)
+    monkeypatch.setattr(app, "DaemonClient", lambda _runtime: fake_client)
 
     exit_code = app.run_dm_history(argparse.Namespace(target="@bubbles", json=False, tail=None))
 
@@ -1074,7 +1099,7 @@ def test_run_dm_history_emits_read_receipts_for_unread_inbound_messages(tmp_path
     assert exit_code == 0
     assert "first unread" in captured.out
     assert "already read" in captured.out
-    assert seen == [
+    assert fake_client.calls == [
         {
             "command": "dm_mark_read",
             "peer_id": identity.peer_id,

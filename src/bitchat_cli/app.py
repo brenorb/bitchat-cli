@@ -5,7 +5,6 @@ import asyncio
 import json
 import os
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -13,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .constants import CHARACTERISTIC_UUID, SERVICE_UUID
+from .daemon_client import DaemonClient
 from .files import load_outgoing_file
 from .geochat import (
     GeoChatDaemon,
@@ -169,32 +169,6 @@ def _record_geohash_event(
         file=log_handle,
         flush=True,
     )
-
-
-def _send_daemon_command(runtime: RuntimePaths, payload: dict[str, object]) -> dict[str, object]:
-    if not runtime.daemon_socket_path.exists():
-        raise RuntimeError("daemon socket not found; start `bitchat daemon start` first")
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        client.connect(str(runtime.daemon_socket_path))
-        client.sendall((json.dumps(payload) + "\n").encode("utf-8"))
-        response = b""
-        while not response.endswith(b"\n"):
-            chunk = client.recv(4096)
-            if not chunk:
-                break
-            response += chunk
-    except OSError as exc:
-        raise RuntimeError(f"failed to talk to daemon: {exc}") from exc
-    finally:
-        client.close()
-    if not response:
-        raise RuntimeError("daemon returned no response")
-    decoded = json.loads(response.decode("utf-8"))
-    if not decoded.get("ok", False):
-        raise RuntimeError(str(decoded.get("error") or "daemon command failed"))
-    return decoded
-
 
 def doctor_payload(store: StateStore) -> dict[str, object]:
     state = store.load()
@@ -1386,10 +1360,9 @@ def run_daemon_status(_args: argparse.Namespace) -> int:
         print(f"inbox: {runtime.inbox_path}")
         print(f"peers: {runtime.peers_path}")
         try:
-            response = _send_daemon_command(runtime, {"command": "runtime_status"})
+            runtime_status = DaemonClient(runtime).runtime_status()
         except RuntimeError:
-            response = {}
-        runtime_status = response.get("runtime") if isinstance(response, dict) else None
+            runtime_status = None
         if isinstance(runtime_status, dict):
             print(f"connected_links: {runtime_status.get('connected_links')}")
             print(f"known_peers:     {runtime_status.get('known_peers')}")
@@ -1819,13 +1792,9 @@ def run_dm_send(args: argparse.Namespace) -> int:
         print(str(exc))
         return 1
     try:
-        response = _send_daemon_command(
-            runtime,
-            {
-                "command": "dm_send",
-                "peer_id": str(peer["peer_id"]),
-                "content": args.message,
-            },
+        response = DaemonClient(runtime).send_dm(
+            peer_id=str(peer["peer_id"]),
+            content=args.message,
         )
     except RuntimeError as exc:
         print(str(exc))
@@ -1842,13 +1811,9 @@ def run_dm_send_file(args: argparse.Namespace) -> int:
         print(str(exc))
         return 1
     try:
-        response = _send_daemon_command(
-            runtime,
-            {
-                "command": "dm_send_file",
-                "peer_id": str(peer["peer_id"]),
-                "path": args.path,
-            },
+        response = DaemonClient(runtime).send_dm_file(
+            peer_id=str(peer["peer_id"]),
+            path=args.path,
         )
     except RuntimeError as exc:
         print(str(exc))
@@ -1860,13 +1825,7 @@ def run_dm_send_file(args: argparse.Namespace) -> int:
 def run_send(args: argparse.Namespace) -> int:
     runtime = RuntimePaths()
     try:
-        _send_daemon_command(
-            runtime,
-            {
-                "command": "public_send",
-                "content": args.message,
-            },
-        )
+        DaemonClient(runtime).send_public(content=args.message)
     except RuntimeError as exc:
         print(str(exc))
         return 1
@@ -1877,13 +1836,7 @@ def run_send(args: argparse.Namespace) -> int:
 def run_send_file(args: argparse.Namespace) -> int:
     runtime = RuntimePaths()
     try:
-        response = _send_daemon_command(
-            runtime,
-            {
-                "command": "public_send_file",
-                "path": args.path,
-            },
-        )
+        response = DaemonClient(runtime).send_public_file(path=args.path)
     except RuntimeError as exc:
         print(str(exc))
         return 1
@@ -1909,15 +1862,11 @@ def run_geo_send(args: argparse.Namespace) -> int:
         print("pow difficulty must be non-negative")
         return 1
     try:
-        _send_daemon_command(
-            runtime,
-            {
-                "command": "geo_send",
-                "geohash": geohash,
-                "content": args.message,
-                "pow_difficulty": int(args.pow),
-                "teleported": bool(args.teleport),
-            },
+        DaemonClient(runtime).send_geo(
+            geohash=geohash,
+            content=args.message,
+            pow_difficulty=int(args.pow),
+            teleported=bool(args.teleport),
         )
     except RuntimeError as exc:
         print(str(exc))
@@ -1946,7 +1895,7 @@ def run_geo_watch_add(args: argparse.Namespace) -> int:
     state.watched_geohashes = watched
     store.save(state)
     try:
-        _send_daemon_command(runtime, {"command": "geo_watch_set", "geohashes": watched})
+        DaemonClient(runtime).set_geo_watches(watched)
     except RuntimeError:
         pass
     print(f"watching #{geohash}")
@@ -1966,7 +1915,7 @@ def run_geo_watch_remove(args: argparse.Namespace) -> int:
     state.watched_geohashes = watched
     store.save(state)
     try:
-        _send_daemon_command(runtime, {"command": "geo_watch_set", "geohashes": watched})
+        DaemonClient(runtime).set_geo_watches(watched)
     except RuntimeError:
         pass
     print(f"stopped watching #{geohash}")
@@ -2075,13 +2024,9 @@ def run_dm_history(args: argparse.Namespace) -> int:
     pending_read_receipts = _pending_read_receipt_ids(rows, conversation_id)
     if pending_read_receipts:
         try:
-            _send_daemon_command(
-                runtime,
-                {
-                    "command": "dm_mark_read",
-                    "peer_id": conversation_id,
-                    "message_ids": pending_read_receipts,
-                },
+            DaemonClient(runtime).mark_dm_read(
+                peer_id=conversation_id,
+                message_ids=pending_read_receipts,
             )
         except RuntimeError:
             pass

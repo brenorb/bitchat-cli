@@ -18,10 +18,29 @@ _DEFAULT_NOSTR_RELAYS = [
     "wss://relay.primal.net",
     "wss://offchain.pub",
 ]
+_APP_ARTIFACT_NAMES = (
+    "state.json",
+    "messages.jsonl",
+    "peers.json",
+    "social.json",
+    "daemon.pid",
+    "daemon.sock",
+    "radio.pid",
+)
+
+
+def _has_app_artifacts(path: Path) -> bool:
+    return any((path / name).exists() for name in _APP_ARTIFACT_NAMES)
 
 
 def default_app_dir() -> Path:
-    return Path.home() / ".config" / "bitchat-cli"
+    preferred = Path.home() / ".config" / "bitchat"
+    legacy = Path.home() / ".config" / "bitchat-cli"
+    if _has_app_artifacts(legacy) and not _has_app_artifacts(preferred):
+        return legacy
+    if preferred.exists() or not legacy.exists():
+        return preferred
+    return legacy
 
 
 def default_state_path() -> Path:
@@ -38,7 +57,6 @@ class AppState:
     network_proxy_mode: str
     network_proxy_url: str | None
     network_proxy_policy: str
-    geo_lookup_provider: str
     watched_geohashes: list[str]
 
     @classmethod
@@ -54,7 +72,6 @@ class AppState:
             network_proxy_mode="disabled",
             network_proxy_url=None,
             network_proxy_policy="prefer",
-            geo_lookup_provider="nominatim",
             watched_geohashes=[],
         )
 
@@ -67,7 +84,6 @@ class AppState:
         data["network_proxy_mode"] = self.network_proxy_mode
         data["network_proxy_url"] = self.network_proxy_url
         data["network_proxy_policy"] = self.network_proxy_policy
-        data["geo_lookup_provider"] = self.geo_lookup_provider
         data["watched_geohashes"] = list(self.watched_geohashes)
         return data
 
@@ -109,7 +125,6 @@ class StateStore:
                 else None
             ),
             network_proxy_policy=network_proxy_policy,
-            geo_lookup_provider=str(data.get("geo_lookup_provider") or "nominatim"),
             watched_geohashes=[
                 str(item)
                 for item in data.get("watched_geohashes", [])
@@ -122,7 +137,6 @@ class StateStore:
             or "nostr_relays" not in data
             or "network_proxy_mode" not in data
             or "network_proxy_policy" not in data
-            or "geo_lookup_provider" not in data
             or "watched_geohashes" not in data
         ):
             self.save(state)

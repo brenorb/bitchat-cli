@@ -1,6 +1,6 @@
-# bitchat-cli
+# bitchat
 
-`bitchat-cli` is a clean-room Python CLI for BitChat public chat over Bluetooth LE.
+`bitchat` is a clean-room Python CLI for BitChat public chat over Bluetooth LE.
 
 Current scope:
 
@@ -15,7 +15,7 @@ Current scope:
 - macOS BLE peripheral advertising and subscriber writes for app-to-CLI reachability
 - Inbound fragment reassembly and outbound packet fragmentation for oversized BLE payloads
 - Direct BLE private messaging over Noise XX with lazy handshake
-- Public and DM file/image transfer with inbound persistence under `~/.config/bitchat-cli/{files,images}/incoming`
+- Public and DM file/image transfer with inbound persistence under `~/.config/bitchat/{files,images}/incoming`
 - Official Noise XX session primitives validated against the macOS app's test vectors
 - Duplicate-safe multi-hop relay for public traffic and directed Noise packets
 - Local public-message, fragment, and public file-transfer sync over `REQUEST_SYNC` with official-style `RSR` responses
@@ -88,7 +88,7 @@ uv run bitchat dm history @bubbles
 uv run bitchat daemon stop
 ```
 
-Daemon artifacts live under `~/.config/bitchat-cli/`:
+Daemon artifacts live under `~/.config/bitchat/`:
 
 - `daemon.log` - background listener log
 - `daemon.sock` - local control socket for `dm send` and read-receipt commands
