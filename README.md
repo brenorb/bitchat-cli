@@ -72,7 +72,8 @@ Daemon artifacts live under `~/.config/bitchat-cli/`:
 Behavior notes:
 
 - The daemon now follows the macOS app's basic scanning shape: duty-cycled
-  background scanning instead of a tight `discover()` loop.
+  background scanning instead of a tight `discover()` loop, with longer idle
+  and connected off-windows to reduce background Bluetooth churn.
 - `inbox` deduplicates repeated deliveries of the same signed BitChat packet.
 - The transport relays signed public packets, oversized packet fragments, and
   directed Noise handshakes/encrypted payloads across connected peers with TTL
@@ -87,6 +88,8 @@ Behavior notes:
   dropped early instead of consuming relay or session work.
 - BLE discovery now feeds a bounded connect queue instead of spawning an
   unbounded connect task per discovered device.
+- Failed or short-lived BLE links now back off exponentially instead of
+  retrying at a near-constant background cadence.
 - Newly seen direct peers get a local-only public sync request, and the CLI can
   answer `REQUEST_SYNC` packets with cached announces and public messages,
   marking solicited replay packets with the official `RSR` wire flag.

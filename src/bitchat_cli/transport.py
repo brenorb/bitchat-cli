@@ -49,6 +49,12 @@ _STALE_RECONNECT_RETENTION_SECONDS = 300.0
 _MAX_FUTURE_TIMESTAMP_SKEW_SECONDS = 120.0
 _MAX_BROADCAST_PACKET_AGE_SECONDS = 900.0
 _SYNC_PUBLIC_MESSAGE_CAPACITY = 256
+_BACKGROUND_CONNECTED_SCAN_OFF_SECONDS = 30.0
+_BACKGROUND_IDLE_SCAN_OFF_SECONDS = 60.0
+_BACKGROUND_IDLE_THRESHOLD_SECONDS = 60.0
+_MAX_BACKGROUND_SCAN_OFF_SECONDS = 120.0
+_MAX_RECONNECT_BACKOFF_SECONDS = 120.0
+_STABLE_CONNECTION_RESET_SECONDS = 60.0
 
 
 @dataclass(slots=True)
@@ -108,6 +114,9 @@ class BLEChatTransport:
         self._scanner_running = False
         self._stop_event = asyncio.Event()
         self._last_runtime_prune_at = 0.0
+        self._last_mesh_activity_at = time.monotonic()
+        self._reconnect_attempts: dict[str, int] = {}
+        self._connected_at: dict[str, float] = {}
 
     async def start(self) -> None:
         self._stop_event.clear()
@@ -265,9 +274,8 @@ class BLEChatTransport:
                 await self._stop_event.wait()
                 return
 
-            scan_on_duration = max(1.0, self.scan_interval)
-            scan_off_duration = max(scan_on_duration * 2.0, 10.0)
             while not self._stop_event.is_set():
+                scan_on_duration, scan_off_duration = self._background_scan_durations()
                 self._prune_runtime_state()
                 await self._set_scanning(True)
                 try:
@@ -338,6 +346,8 @@ class BLEChatTransport:
                 lambda _sender, data, addr=address: self._enqueue_notification(addr, bytes(data)),
             )
             self.clients[address] = client
+            self._connected_at[address] = time.monotonic()
+            self._mark_mesh_activity()
             self.system_log(f"Connected to BitChat peer at {address}.")
             packet = self._make_announce_packet()
             self._remember_sync_packet(packet)
@@ -354,6 +364,9 @@ class BLEChatTransport:
             self.connecting.discard(address)
 
     def _on_disconnect(self, address: str) -> None:
+        connected_at = self._connected_at.pop(address, None)
+        if connected_at is not None and time.monotonic() - connected_at >= _STABLE_CONNECTION_RESET_SECONDS:
+            self._reconnect_attempts.pop(address, None)
         self._record_reconnect_backoff(address, multiplier=1.0 if self.background_mode else 0.4)
         if self.clients.pop(address, None) is not None:
             self._remove_address_from_peers(address)
@@ -361,6 +374,7 @@ class BLEChatTransport:
 
     async def _handle_notification(self, address: str, data: bytes) -> None:
         self._prune_runtime_state()
+        self._mark_mesh_activity()
         try:
             packet = Packet.decode(data)
         except Exception:
@@ -821,6 +835,16 @@ class BLEChatTransport:
             for address, ready_at in self._reconnect_ready_at.items()
             if ready_at >= reconnect_cutoff
         }
+        self._reconnect_attempts = {
+            address: attempts
+            for address, attempts in self._reconnect_attempts.items()
+            if address in self._reconnect_ready_at or address in self.clients
+        }
+        self._connected_at = {
+            address: connected_at
+            for address, connected_at in self._connected_at.items()
+            if address in self.clients
+        }
 
         stale_cutoff = wall_now.timestamp() - _STALE_PEER_RETENTION_SECONDS
         stale_peer_ids: list[str] = []
@@ -939,6 +963,7 @@ class BLEChatTransport:
 
     async def _write_packet(self, client: BleakClient, packet: Packet) -> None:
         data = packet.encode(padding=False)
+        self._mark_mesh_activity()
         if packet.signature is not None:
             self._recent_own_signatures.append(packet.signature.hex())
         if len(data) <= MAX_PACKET_SIZE:
@@ -954,9 +979,33 @@ class BLEChatTransport:
     def _can_attempt_reconnect(self, address: str) -> bool:
         return time.monotonic() >= self._reconnect_ready_at.get(address, 0.0)
 
-    def _record_reconnect_backoff(self, address: str, *, multiplier: float) -> None:
-        base_delay = max(self.scan_interval, 2.0)
-        delay = max(base_delay * multiplier, 2.0)
+    def _record_reconnect_backoff(
+        self,
+        address: str,
+        *,
+        multiplier: float,
+        now_monotonic: float | None = None,
+    ) -> None:
+        now = now_monotonic if now_monotonic is not None else time.monotonic()
+        attempts = self._reconnect_attempts.get(address, 0) + 1
+        self._reconnect_attempts[address] = attempts
+        base_delay = max(max(self.scan_interval, 2.0) * multiplier, 2.0)
         if self.background_mode:
-            delay = max(delay, 10.0)
-        self._reconnect_ready_at[address] = time.monotonic() + delay
+            base_delay = max(base_delay, 10.0)
+        delay = base_delay * (2 ** (attempts - 1))
+        delay = min(delay, _MAX_RECONNECT_BACKOFF_SECONDS)
+        self._reconnect_ready_at[address] = now + delay
+
+    def _background_scan_durations(self, *, now_monotonic: float | None = None) -> tuple[float, float]:
+        now = now_monotonic if now_monotonic is not None else time.monotonic()
+        scan_on_duration = max(1.0, self.scan_interval)
+        scan_off_duration = max(scan_on_duration * 2.0, 10.0)
+        idle_for = max(0.0, now - self._last_mesh_activity_at)
+        if self.clients:
+            scan_off_duration = max(scan_off_duration, _BACKGROUND_CONNECTED_SCAN_OFF_SECONDS)
+        elif idle_for >= _BACKGROUND_IDLE_THRESHOLD_SECONDS:
+            scan_off_duration = max(scan_off_duration, _BACKGROUND_IDLE_SCAN_OFF_SECONDS)
+        return scan_on_duration, min(scan_off_duration, _MAX_BACKGROUND_SCAN_OFF_SECONDS)
+
+    def _mark_mesh_activity(self, *, now_monotonic: float | None = None) -> None:
+        self._last_mesh_activity_at = now_monotonic if now_monotonic is not None else time.monotonic()

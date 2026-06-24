@@ -5,6 +5,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+import bitchat_cli.transport as transport_module
 from bitchat_cli.constants import MessageType
 from bitchat_cli.crypto import Identity
 from bitchat_cli.protocol import Announcement, Packet, make_announce_packet, make_noise_handshake_packet, make_public_message_packet
@@ -747,6 +748,82 @@ def test_connect_enqueue_drops_when_queue_is_full() -> None:
 
     assert queued.address == "A1"
     assert any("Dropped connect candidate" in message for message in logs)
+
+
+def test_background_scan_off_duration_extends_when_idle() -> None:
+    transport = BLEChatTransport(
+        identity=Identity.generate(),
+        nickname="local",
+        system_log=lambda *_args: None,
+        message_log=lambda *_args: None,
+        background_mode=True,
+        scan_interval=5.0,
+    )
+    transport._last_mesh_activity_at = 0.0
+
+    on_duration, off_duration = transport._background_scan_durations(now_monotonic=90.0)
+
+    assert on_duration == 5.0
+    assert off_duration == 60.0
+
+
+def test_background_scan_off_duration_extends_with_live_peers() -> None:
+    transport = BLEChatTransport(
+        identity=Identity.generate(),
+        nickname="local",
+        system_log=lambda *_args: None,
+        message_log=lambda *_args: None,
+        background_mode=True,
+        scan_interval=5.0,
+    )
+    transport.clients = {"A1": "A1"}  # type: ignore[assignment]
+
+    _on_duration, off_duration = transport._background_scan_durations(now_monotonic=10.0)
+
+    assert off_duration == 30.0
+
+
+def test_reconnect_backoff_grows_for_flaky_peer() -> None:
+    transport = BLEChatTransport(
+        identity=Identity.generate(),
+        nickname="local",
+        system_log=lambda *_args: None,
+        message_log=lambda *_args: None,
+        background_mode=True,
+        scan_interval=5.0,
+    )
+
+    transport._record_reconnect_backoff("A1", multiplier=1.0, now_monotonic=100.0)
+    first_ready = transport._reconnect_ready_at["A1"]
+    transport._record_reconnect_backoff("A1", multiplier=1.0, now_monotonic=105.0)
+    second_ready = transport._reconnect_ready_at["A1"]
+
+    assert first_ready == 110.0
+    assert second_ready == 125.0
+
+
+def test_stable_connection_resets_reconnect_backoff() -> None:
+    transport = BLEChatTransport(
+        identity=Identity.generate(),
+        nickname="local",
+        system_log=lambda *_args: None,
+        message_log=lambda *_args: None,
+        background_mode=True,
+        scan_interval=5.0,
+    )
+    transport._record_reconnect_backoff("A1", multiplier=1.0, now_monotonic=100.0)
+    transport._record_reconnect_backoff("A1", multiplier=1.0, now_monotonic=105.0)
+    transport.clients = {"A1": "A1"}  # type: ignore[assignment]
+    transport._connected_at["A1"] = 120.0
+
+    original_monotonic = transport_module.time.monotonic
+    transport_module.time.monotonic = lambda: 190.0
+    try:
+        transport._on_disconnect("A1")
+    finally:
+        transport_module.time.monotonic = original_monotonic
+
+    assert transport._reconnect_ready_at["A1"] == 200.0
 
 
 def test_announce_packet_includes_connected_direct_neighbors() -> None:
