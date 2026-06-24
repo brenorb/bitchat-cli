@@ -71,9 +71,9 @@ Behavior notes:
 - The daemon now follows the macOS app's basic scanning shape: duty-cycled
   background scanning instead of a tight `discover()` loop.
 - `inbox` deduplicates repeated deliveries of the same signed BitChat packet.
-- The transport relays signed public packets plus directed Noise handshakes and
-  encrypted payloads across connected peers with TTL decrement and loop
-  suppression.
+- The transport relays signed public packets, oversized packet fragments, and
+  directed Noise handshakes/encrypted payloads across connected peers with TTL
+  decrement and loop suppression.
 - Direct DM traffic uses one active BLE link per peer instead of writing the
   same packet to every historical address we have seen for that peer.
 - The daemon now processes inbound BLE notifications through a bounded worker

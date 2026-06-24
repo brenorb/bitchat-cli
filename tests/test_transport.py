@@ -8,6 +8,7 @@ from bitchat_cli.constants import MessageType
 from bitchat_cli.crypto import Identity
 from bitchat_cli.protocol import Packet, make_noise_handshake_packet, make_public_message_packet
 from bitchat_cli.transport import BLEChatTransport, PeerRecord
+from bitchat_cli.fragments import fragment_packet_sequence
 
 
 @dataclass
@@ -492,5 +493,56 @@ def test_notification_enqueue_drops_when_queue_is_full() -> None:
 
         assert queued == ("A1", b"one")
         assert "Dropped inbound packet" in logs[0]
+
+    asyncio.run(case())
+
+
+def test_fragment_relays_before_full_reassembly() -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        alice_identity = Identity.generate()
+        charlie_identity = Identity.generate()
+        public_messages: list[tuple[str, str, datetime, str | None, str | None]] = []
+        transport = BLEChatTransport(
+            identity=local_identity,
+            nickname="local",
+            system_log=lambda _message: None,
+            message_log=lambda sender, content, timestamp, peer_id, message_id: public_messages.append(
+                (sender, content, timestamp, peer_id, message_id)
+            ),
+        )
+        _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="A1")
+        _register_known_peer(transport, peer_identity=charlie_identity, nickname="charlie", address="C1")
+        transport.clients = {"A1": "A1", "C1": "C1"}  # type: ignore[assignment]
+
+        relayed_packets: list[tuple[str, Packet]] = []
+
+        async def fake_write(client, packet: Packet) -> None:
+            relayed_packets.append((client, packet))
+
+        transport._write_packet = fake_write  # type: ignore[method-assign]
+
+        oversized = Packet(
+            packet_type=MessageType.MESSAGE,
+            sender_id=bytes.fromhex(alice_identity.peer_id),
+            payload=bytes(range(256)) * 4,
+        ).sign(alice_identity)
+        fragments = fragment_packet_sequence(oversized)
+        assert len(fragments) > 1
+
+        await transport._handle_decoded_packet("A1", fragments[0])
+
+        assert public_messages == []
+        assert len(relayed_packets) == 1
+        assert relayed_packets[0][0] == "C1"
+        assert relayed_packets[0][1].packet_type == MessageType.FRAGMENT
+        assert relayed_packets[0][1].ttl == fragments[0].ttl - 1
+
+        for fragment in fragments[1:]:
+            await transport._handle_decoded_packet("A1", fragment)
+
+        assert len(public_messages) == 1
+        assert public_messages[0][0] == "alice"
+        assert len(relayed_packets) == len(fragments)
 
     asyncio.run(case())

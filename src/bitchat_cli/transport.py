@@ -321,24 +321,25 @@ class BLEChatTransport:
                 self._notification_queue.task_done()
 
     async def _handle_decoded_packet(self, address: str, packet: Packet) -> None:
+        signature_hex = packet.signature.hex() if packet.signature else None
+        if packet.sender_id.hex() == self.identity.peer_id or (
+            signature_hex is not None and signature_hex in self._recent_own_signatures
+        ):
+            return
+
         packet_key = packet_cache_key(packet)
         if self._recent_seen_packets.mark_seen(packet_key):
             return
 
         if packet.packet_type == MessageType.FRAGMENT:
+            await self._relay_if_needed(address, packet)
             try:
                 reassembled = self._fragment_buffer.append(packet)
             except Exception as exc:
                 self.system_log(f"Ignored invalid fragment stream from {address}: {exc}")
                 return
             if reassembled is not None:
-                await self._handle_decoded_packet(address, reassembled)
-            return
-
-        signature_hex = packet.signature.hex() if packet.signature else None
-        if packet.sender_id.hex() == self.identity.peer_id or (
-            signature_hex is not None and signature_hex in self._recent_own_signatures
-        ):
+                await self._handle_decoded_packet(address, self._local_only_packet(reassembled))
             return
 
         await self._relay_if_needed(address, packet)
@@ -374,6 +375,7 @@ class BLEChatTransport:
             MessageType.LEAVE,
             MessageType.NOISE_HANDSHAKE,
             MessageType.NOISE_ENCRYPTED,
+            MessageType.FRAGMENT,
         }
         if packet.packet_type not in relayable_types:
             return
@@ -389,6 +391,18 @@ class BLEChatTransport:
             version=packet.version,
         )
         await self._broadcast_packet(relayed_packet, exclude_addresses={ingress_address})
+
+    def _local_only_packet(self, packet: Packet) -> Packet:
+        return Packet(
+            packet_type=packet.packet_type,
+            sender_id=packet.sender_id,
+            recipient_id=packet.recipient_id,
+            timestamp_ms=packet.timestamp_ms,
+            payload=packet.payload,
+            signature=packet.signature,
+            ttl=0,
+            version=packet.version,
+        )
 
     async def _handle_announce(self, address: str, packet: Packet) -> None:
         try:
