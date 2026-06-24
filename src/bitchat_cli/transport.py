@@ -47,6 +47,7 @@ class PeerRecord:
     noise_public_key: bytes
     signing_public_key: bytes
     addresses: set[str] = field(default_factory=set)
+    active_address: str | None = None
     last_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -378,6 +379,7 @@ class BLEChatTransport:
         peer.signing_public_key = announcement.signing_public_key
         peer.last_seen = datetime.fromtimestamp(packet.timestamp_ms / 1000, tz=timezone.utc)
         peer.addresses.add(address)
+        peer.active_address = address
         self.known_peers[claimed_peer_id] = peer
         if self.peer_log is not None:
             self.peer_log(peer)
@@ -602,11 +604,18 @@ class BLEChatTransport:
         if peer is None:
             self.system_log(f"Unknown peer_id for direct packet: {peer_id}")
             return False
-        target_clients = [self.clients[address] for address in sorted(peer.addresses) if address in self.clients]
-        if not target_clients:
+        target_address = None
+        if peer.active_address is not None and peer.active_address in self.clients:
+            target_address = peer.active_address
+        else:
+            for address in sorted(peer.addresses):
+                if address in self.clients:
+                    target_address = address
+                    break
+        if target_address is None:
             self.system_log(f"No connected BitChat link to {peer.nickname} ({peer.peer_id}).")
             return False
-        await asyncio.gather(*(self._write_packet(client, packet) for client in target_clients), return_exceptions=True)
+        await self._write_packet(self.clients[target_address], packet)
         return True
 
     async def _broadcast_packet(self, packet: Packet, *, exclude_addresses: set[str] | None = None) -> None:

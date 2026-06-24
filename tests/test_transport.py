@@ -408,3 +408,36 @@ def test_duplicate_handshake_packet_is_suppressed_after_session_establishes() ->
         assert bob_outbox == []
 
     asyncio.run(case())
+
+
+def test_direct_send_prefers_one_active_address_per_peer() -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        peer_identity = Identity.generate()
+        transport = _make_transport(
+            identity=local_identity,
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+        )
+        _register_known_peer(transport, peer_identity=peer_identity, nickname="peer", address="B1")
+        transport.known_peers[peer_identity.peer_id].addresses.add("B2")
+        transport.known_peers[peer_identity.peer_id].active_address = "B2"
+        transport.clients = {"B1": "B1", "B2": "B2"}  # type: ignore[assignment]
+
+        writes: list[tuple[str, Packet]] = []
+
+        async def fake_write(client, packet: Packet) -> None:
+            writes.append((client, packet))
+
+        transport._write_packet = fake_write  # type: ignore[method-assign]
+
+        sent = await transport._send_packet_to_peer(
+            peer_identity.peer_id,
+            make_noise_handshake_packet(local_identity, peer_identity.peer_id, b"hs1"),
+        )
+
+        assert sent is True
+        assert writes == [("B2", writes[0][1])]
+
+    asyncio.run(case())
