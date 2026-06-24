@@ -21,6 +21,8 @@ class PeripheralEndpoint(Protocol):
 
     def subscriber_count(self) -> int: ...
 
+    def is_advertising(self) -> bool: ...
+
     def send(
         self,
         data: bytes,
@@ -39,6 +41,9 @@ class NullPeripheralEndpoint:
 
     def subscriber_count(self) -> int:
         return 0
+
+    def is_advertising(self) -> bool:
+        return False
 
     def send(
         self,
@@ -221,6 +226,9 @@ class MacOSPeripheralEndpoint:
 
     def subscriber_count(self) -> int:
         return len(self._subscribed_centrals)
+
+    def is_advertising(self) -> bool:
+        return self._is_advertising
 
     def send(
         self,

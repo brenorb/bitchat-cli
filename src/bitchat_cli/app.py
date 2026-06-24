@@ -675,6 +675,16 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                             )
                             sent_count += 1
                         response = {"ok": True, "count": sent_count}
+                elif command == "runtime_status":
+                    response = {
+                        "ok": True,
+                        "runtime": {
+                            "connected_links": len(transport.clients),
+                            "known_peers": len(transport.known_peers),
+                            "peripheral_advertising": transport.peripheral_endpoint.is_advertising(),
+                            "peripheral_subscribers": transport.peripheral_endpoint.subscriber_count(),
+                        },
+                    }
                 else:
                     response = {"ok": False, "error": "unknown daemon command"}
                 writer.write((json.dumps(response) + "\n").encode("utf-8"))
@@ -885,6 +895,16 @@ def run_daemon_status(_args: argparse.Namespace) -> int:
         print(f"socket: {runtime.daemon_socket_path}")
         print(f"inbox: {runtime.inbox_path}")
         print(f"peers: {runtime.peers_path}")
+        try:
+            response = _send_daemon_command(runtime, {"command": "runtime_status"})
+        except RuntimeError:
+            response = {}
+        runtime_status = response.get("runtime") if isinstance(response, dict) else None
+        if isinstance(runtime_status, dict):
+            print(f"connected_links: {runtime_status.get('connected_links')}")
+            print(f"known_peers:     {runtime_status.get('known_peers')}")
+            print(f"peripheral_adv:  {runtime_status.get('peripheral_advertising')}")
+            print(f"peripheral_subs: {runtime_status.get('peripheral_subscribers')}")
         return 0
     print(f"daemon pid file exists but process {pid} is not running")
     return 1

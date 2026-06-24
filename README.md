@@ -84,6 +84,9 @@ Behavior notes:
 - `daemon stop` now waits briefly for a clean shutdown and lease cleanup, so an
   immediate `daemon start` is less likely to trip over stale `daemon.pid` or
   `radio.pid` state.
+- `daemon status` now asks the live daemon for runtime details when the control
+  socket is available, including whether peripheral advertising is active and
+  how many peripheral subscribers are attached.
 - `send` queues a public channel message through the running daemon, so you can
   test outbound delivery without stopping the background listener to open
   interactive `chat`.

@@ -313,6 +313,39 @@ def test_run_daemon_start_uses_repo_src_in_pythonpath(tmp_path: Path, monkeypatc
     assert "43210" in captured.out
 
 
+def test_run_daemon_status_includes_live_runtime_fields(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    runtime.root.mkdir(parents=True, exist_ok=True)
+    runtime.daemon_pid_path.write_text("43210\n", encoding="utf-8")
+    seen: list[dict[str, object]] = []
+
+    def fake_send_daemon_command(_runtime: RuntimePaths, payload: dict[str, object]) -> dict[str, object]:
+        seen.append(payload)
+        return {
+            "ok": True,
+            "runtime": {
+                "connected_links": 1,
+                "known_peers": 2,
+                "peripheral_advertising": True,
+                "peripheral_subscribers": 3,
+            },
+        }
+
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+    monkeypatch.setattr(app, "pid_is_running", lambda _pid: True)
+    monkeypatch.setattr(app, "_send_daemon_command", fake_send_daemon_command)
+
+    exit_code = app.run_daemon_status(argparse.Namespace())
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert seen == [{"command": "runtime_status"}]
+    assert "connected_links: 1" in captured.out
+    assert "known_peers:     2" in captured.out
+    assert "peripheral_adv:  True" in captured.out
+    assert "peripheral_subs: 3" in captured.out
+
+
 def test_run_daemon_stop_waits_for_exit_and_cleans_runtime_files(tmp_path: Path, monkeypatch, capsys) -> None:
     runtime = RuntimePaths(tmp_path)
     runtime.root.mkdir(parents=True, exist_ok=True)
