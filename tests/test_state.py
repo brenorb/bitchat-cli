@@ -64,6 +64,61 @@ def test_message_store_can_deduplicate_records_for_inbox_views(tmp_path: Path) -
     assert rows[0]["message_id"] == "sig:1234"
 
 
+def test_message_store_skips_persisting_duplicate_message_ids(tmp_path: Path) -> None:
+    store = MessageStore(tmp_path / "messages.jsonl")
+    ts = datetime(2026, 6, 24, 0, 9, 44, 932000, tzinfo=timezone.utc)
+    store.append(
+        direction="inbound",
+        sender="bubbles",
+        content="Opa, ta escutando?",
+        timestamp=ts,
+        peer_id="abcd",
+        message_id="sig:1234",
+    )
+    store.append(
+        direction="inbound",
+        sender="bubbles",
+        content="Opa, ta escutando?",
+        timestamp=ts,
+        peer_id="abcd",
+        message_id="sig:1234",
+    )
+
+    rows = store.read_all()
+
+    assert len(rows) == 1
+    assert rows[0]["message_id"] == "sig:1234"
+
+
+def test_message_store_reuses_existing_file_keys_across_restart(tmp_path: Path) -> None:
+    path = tmp_path / "messages.jsonl"
+    first = MessageStore(path)
+    ts = datetime(2026, 6, 24, 0, 9, 44, 932000, tzinfo=timezone.utc)
+    first.append(
+        direction="inbound",
+        sender="bubbles",
+        content="Ping - 1",
+        timestamp=ts,
+        peer_id="abcd",
+        message_id="sig:abcd",
+    )
+
+    second = MessageStore(path)
+    second.append(
+        direction="inbound",
+        sender="bubbles",
+        content="Ping - 1",
+        timestamp=ts,
+        peer_id="abcd",
+        message_id="sig:abcd",
+    )
+
+    rows = second.read_all()
+
+    assert len(rows) == 1
+    assert rows[0]["message_id"] == "sig:abcd"
+
+
 def test_message_store_persists_scope_and_conversation_metadata(tmp_path: Path) -> None:
     store = MessageStore(tmp_path / "messages.jsonl")
     ts = datetime(2026, 6, 24, 1, 0, 0, tzinfo=timezone.utc)

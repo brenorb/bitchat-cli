@@ -138,6 +138,7 @@ class ActiveSessionLease:
 class MessageStore:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or RuntimePaths().inbox_path
+        self._seen_append_keys: set[str] | None = None
 
     def append(
         self,
@@ -169,8 +170,17 @@ class MessageStore:
             "target_peer_id": target_peer_id,
             "delivery_state": delivery_state,
         }
+        append_key = self._append_key(record)
+        if append_key is not None:
+            self._ensure_append_index()
+            assert self._seen_append_keys is not None
+            if append_key in self._seen_append_keys:
+                return
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+        if append_key is not None:
+            assert self._seen_append_keys is not None
+            self._seen_append_keys.add(append_key)
 
     def read_all(self, *, deduplicate: bool = False) -> list[dict[str, Any]]:
         if not self.path.exists():
@@ -185,21 +195,37 @@ class MessageStore:
             rows = self._deduplicate(rows)
         return rows
 
+    def _ensure_append_index(self) -> None:
+        if self._seen_append_keys is not None:
+            return
+        seen: set[str] = set()
+        if self.path.exists():
+            for row in self.read_all():
+                key = self._append_key(row)
+                if key is not None:
+                    seen.add(key)
+        self._seen_append_keys = seen
+
+    def _append_key(self, row: dict[str, Any]) -> str | None:
+        message_id = row.get("message_id")
+        if not message_id:
+            return None
+        return "|".join(
+            [
+                str(row.get("scope", "public")),
+                str(row.get("message_kind", "message")),
+                str(row.get("direction")),
+                str(row.get("peer_id")),
+                str(message_id),
+            ]
+        )
+
     def _deduplicate(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen: set[str] = set()
         deduplicated: list[dict[str, Any]] = []
         for row in rows:
-            if row.get("message_id"):
-                key = "|".join(
-                    [
-                        str(row.get("scope", "public")),
-                        str(row.get("message_kind", "message")),
-                        str(row.get("direction")),
-                        str(row.get("peer_id")),
-                        str(row.get("message_id")),
-                    ]
-                )
-            else:
+            key = self._append_key(row)
+            if key is None:
                 key = "|".join(
                     [
                         str(row.get("direction")),
