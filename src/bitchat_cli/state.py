@@ -144,6 +144,11 @@ class MessageStore:
         timestamp: datetime,
         peer_id: str | None = None,
         message_id: str | None = None,
+        scope: str = "public",
+        conversation_id: str | None = None,
+        message_kind: str = "message",
+        target_peer_id: str | None = None,
+        delivery_state: str | None = None,
     ) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         record = {
@@ -154,6 +159,11 @@ class MessageStore:
             "peer_id": peer_id,
             "content": content,
             "message_id": message_id,
+            "scope": scope,
+            "conversation_id": conversation_id,
+            "message_kind": message_kind,
+            "target_peer_id": target_peer_id,
+            "delivery_state": delivery_state,
         }
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=True) + "\n")

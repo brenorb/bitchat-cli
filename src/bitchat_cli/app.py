@@ -27,6 +27,42 @@ async def _open_stdin_reader() -> tuple[asyncio.StreamReader, asyncio.Transport]
     return reader, transport
 
 
+def _resolve_peer_target(transport: BLEChatTransport, raw_target: str):
+    target = raw_target.strip()
+    if target.startswith("@"):
+        target = target[1:]
+    peers = transport.list_peers()
+    direct_match = [peer for peer in peers if peer.peer_id == target]
+    if direct_match:
+        return direct_match[0]
+    nickname_match = [peer for peer in peers if peer.nickname == target]
+    if len(nickname_match) == 1:
+        return nickname_match[0]
+    if len(nickname_match) > 1:
+        raise ValueError(f"ambiguous nickname: {raw_target}")
+    raise ValueError(f"unknown peer: {raw_target}")
+
+
+def _resolve_peer_record(records: list[dict[str, object]], raw_target: str) -> dict[str, object]:
+    target = raw_target.strip()
+    if target.startswith("@"):
+        target = target[1:]
+    direct_match = [record for record in records if record.get("peer_id") == target]
+    if direct_match:
+        return direct_match[0]
+    nickname_match = [record for record in records if record.get("nickname") == target]
+    if len(nickname_match) == 1:
+        return nickname_match[0]
+    if len(nickname_match) > 1:
+        raise ValueError(f"ambiguous nickname: {raw_target}")
+    raise ValueError(f"unknown peer: {raw_target}")
+
+
+def _read_dm_records(runtime: RuntimePaths) -> list[dict[str, object]]:
+    rows = MessageStore(runtime.inbox_path).read_all(deduplicate=True)
+    return [row for row in rows if row.get("scope") == "dm"]
+
+
 def doctor_payload(store: StateStore) -> dict[str, object]:
     state = store.load()
     paths = RuntimePaths()
@@ -54,7 +90,7 @@ def doctor_payload(store: StateStore) -> dict[str, object]:
         },
         "scope": {
             "public_chat": True,
-            "private_noise_chat": False,
+            "private_noise_chat": True,
             "mesh_relay": False,
             "ble_peripheral": False,
             "nostr_geochat": False,
@@ -96,6 +132,8 @@ def _build_transport(
     system_log,
     message_log,
     peer_log,
+    private_message_log,
+    receipt_log,
     background_mode: bool,
 ) -> BLEChatTransport:
     return BLEChatTransport(
@@ -104,6 +142,8 @@ def _build_transport(
         system_log=system_log,
         message_log=message_log,
         peer_log=peer_log,
+        private_message_log=private_message_log,
+        receipt_log=receipt_log,
         scan_interval=scan_interval,
         background_mode=background_mode,
     )
@@ -125,6 +165,7 @@ async def run_chat(args: argparse.Namespace) -> int:
     if args.nickname:
         state.nickname = args.nickname
         store.save(state)
+    transport_ref: dict[str, BLEChatTransport] = {}
 
     def system_log(message: str) -> None:
         print(f"[system] {message}", flush=True)
@@ -157,6 +198,47 @@ async def run_chat(args: argparse.Namespace) -> int:
             last_seen=peer.last_seen,
         )
 
+    def private_message_log(
+        sender: str,
+        content: str,
+        timestamp: datetime,
+        peer_id: str,
+        message_id: str,
+    ) -> None:
+        ts = timestamp.astimezone(timezone.utc).strftime("%H:%M:%S")
+        message_store.append(
+            direction="inbound",
+            sender=sender,
+            content=content,
+            timestamp=timestamp,
+            peer_id=peer_id,
+            message_id=message_id,
+            scope="dm",
+            conversation_id=peer_id,
+            message_kind="private_message",
+        )
+        print(f"\n[{ts}] [dm] <{sender}> {content}", flush=True)
+
+    def receipt_log(peer_id: str, receipt_type: str, message_id: str, timestamp: datetime) -> None:
+        active_transport = transport_ref.get("value")
+        peer = (
+            next((item for item in active_transport.list_peers() if item.peer_id == peer_id), None)
+            if active_transport is not None
+            else None
+        )
+        message_store.append(
+            direction="system",
+            sender=peer.nickname if peer is not None else peer_id,
+            content=receipt_type,
+            timestamp=timestamp,
+            peer_id=peer_id,
+            message_id=message_id,
+            scope="dm",
+            conversation_id=peer_id,
+            message_kind="receipt",
+            delivery_state=receipt_type,
+        )
+
     try:
         transport = _build_transport(
             identity=state.identity,
@@ -164,9 +246,13 @@ async def run_chat(args: argparse.Namespace) -> int:
             system_log=system_log,
             message_log=message_log,
             peer_log=peer_log,
+            private_message_log=private_message_log,
+            receipt_log=receipt_log,
             scan_interval=args.scan_interval,
             background_mode=False,
         )
+        transport_ref["value"] = transport
+        transport.seed_known_peers(peer_store.read_all())
         await transport.start()
         reader, stdin_transport = await _open_stdin_reader()
 
@@ -186,6 +272,7 @@ async def run_chat(args: argparse.Namespace) -> int:
                     print("/help")
                     print("/name <nickname>")
                     print("/who")
+                    print("/msg <@nickname|peer_id> <message>")
                     print("/clear")
                     print("/quit")
                     continue
@@ -210,6 +297,33 @@ async def run_chat(args: argparse.Namespace) -> int:
                     continue
                 if command == "/clear":
                     _clear_screen()
+                    continue
+                if command == "/msg":
+                    target, _, body = rest.strip().partition(" ")
+                    if not target or not body.strip():
+                        print("usage: /msg <@nickname|peer_id> <message>")
+                        continue
+                    try:
+                        peer = _resolve_peer_target(transport, target)
+                    except ValueError as exc:
+                        print(str(exc))
+                        continue
+                    timestamp = datetime.now(timezone.utc)
+                    message_id = await transport.send_private_message(peer.peer_id, body.strip())
+                    message_store.append(
+                        direction="outbound",
+                        sender=state.nickname,
+                        content=body.strip(),
+                        timestamp=timestamp,
+                        peer_id=peer.peer_id,
+                        message_id=message_id,
+                        scope="dm",
+                        conversation_id=peer.peer_id,
+                        message_kind="private_message",
+                        target_peer_id=peer.peer_id,
+                        delivery_state="pending",
+                    )
+                    print(f"[{timestamp.strftime('%H:%M:%S')}] [dm->{peer.nickname}] {body.strip()}")
                     continue
                 if command == "/quit":
                     break
@@ -337,6 +451,7 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
     if args.nickname:
         state.nickname = args.nickname
         store.save(state)
+    transport_ref: dict[str, BLEChatTransport] = {}
 
     log_handle = runtime.daemon_log_path.open("a", encoding="utf-8")
     try:
@@ -372,6 +487,50 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                 last_seen=peer.last_seen,
             )
 
+        def daemon_private_message_log(
+            sender: str,
+            content: str,
+            timestamp: datetime,
+            peer_id: str,
+            message_id: str,
+        ) -> None:
+            message_store.append(
+                direction="inbound",
+                sender=sender,
+                content=content,
+                timestamp=timestamp,
+                peer_id=peer_id,
+                message_id=message_id,
+                scope="dm",
+                conversation_id=peer_id,
+                message_kind="private_message",
+            )
+            print(
+                f"{timestamp.astimezone(timezone.utc).isoformat()} [dm] <{sender}> {content}",
+                file=log_handle,
+                flush=True,
+            )
+
+        def daemon_receipt_log(peer_id: str, receipt_type: str, message_id: str, timestamp: datetime) -> None:
+            active_transport = transport_ref.get("value")
+            peer = (
+                next((item for item in active_transport.list_peers() if item.peer_id == peer_id), None)
+                if active_transport is not None
+                else None
+            )
+            message_store.append(
+                direction="system",
+                sender=peer.nickname if peer is not None else peer_id,
+                content=receipt_type,
+                timestamp=timestamp,
+                peer_id=peer_id,
+                message_id=message_id,
+                scope="dm",
+                conversation_id=peer_id,
+                message_kind="receipt",
+                delivery_state=receipt_type,
+            )
+
         runtime.daemon_pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
         transport = _build_transport(
             identity=state.identity,
@@ -379,9 +538,13 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
             system_log=daemon_log,
             message_log=daemon_message_log,
             peer_log=daemon_peer_log,
+            private_message_log=daemon_private_message_log,
+            receipt_log=daemon_receipt_log,
             scan_interval=args.scan_interval,
             background_mode=True,
         )
+        transport_ref["value"] = transport
+        transport.seed_known_peers(peer_store.read_all())
 
         stop_event = asyncio.Event()
 
@@ -503,7 +666,11 @@ def run_daemon_status(_args: argparse.Namespace) -> int:
 def run_inbox(args: argparse.Namespace) -> int:
     runtime = RuntimePaths()
     records = MessageStore(runtime.inbox_path).read_all(deduplicate=True)
-    records = [row for row in records if row.get("direction") == "inbound"]
+    records = [
+        row
+        for row in records
+        if row.get("direction") == "inbound" and row.get("scope", "public") == "public"
+    ]
     if args.tail is not None:
         records = records[-args.tail :]
     if args.json:
@@ -532,4 +699,83 @@ def run_peers(args: argparse.Namespace) -> int:
     for row in records:
         addresses = ", ".join(row.get("addresses", [])) or "-"
         print(f"{row['nickname']:16} {row['peer_id']}  {row['last_seen']}  {addresses}")
+    return 0
+
+
+def run_dm_inbox(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    peer_rows = PeerStore(runtime.peers_path).read_all()
+    peer_index = {row["peer_id"]: row for row in peer_rows}
+    conversations: dict[str, dict[str, object]] = {}
+    for row in _read_dm_records(runtime):
+        conversation_id = row.get("conversation_id") or row.get("peer_id") or row.get("target_peer_id")
+        if not conversation_id:
+            continue
+        summary = conversations.setdefault(
+            str(conversation_id),
+            {
+                "conversation_id": str(conversation_id),
+                "peer_id": str(conversation_id),
+                "nickname": peer_index.get(str(conversation_id), {}).get("nickname", str(conversation_id)[:8]),
+                "last_timestamp": "",
+                "last_preview": "",
+            },
+        )
+        timestamp = str(row.get("timestamp") or "")
+        if timestamp >= str(summary["last_timestamp"]):
+            summary["last_timestamp"] = timestamp
+            if row.get("message_kind") == "private_message":
+                summary["last_preview"] = str(row.get("content") or "")
+            else:
+                summary["last_preview"] = str(row.get("content") or row.get("message_kind") or "")
+
+    rows = sorted(
+        conversations.values(),
+        key=lambda row: str(row.get("last_timestamp") or ""),
+    )
+    if args.tail is not None:
+        rows = rows[-args.tail :]
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        print("no direct-message conversations recorded")
+        return 0
+    for row in rows:
+        print(
+            f"{row['nickname']:16} {row['peer_id']}  {row['last_timestamp']}  {row['last_preview']}"
+        )
+    return 0
+
+
+def run_dm_history(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    peer_rows = PeerStore(runtime.peers_path).read_all()
+    try:
+        conversation_id = str(_resolve_peer_record(peer_rows, args.target)["peer_id"])
+    except ValueError:
+        conversation_id = args.target[1:] if args.target.startswith("@") else args.target
+
+    rows = []
+    for row in _read_dm_records(runtime):
+        row_conversation_id = row.get("conversation_id") or row.get("peer_id") or row.get("target_peer_id")
+        if str(row_conversation_id) != conversation_id:
+            continue
+        rows.append(row)
+    rows.sort(key=lambda row: str(row.get("timestamp") or ""))
+    if args.tail is not None:
+        rows = rows[-args.tail :]
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        print("no direct messages recorded for that peer")
+        return 0
+    for row in rows:
+        if row.get("message_kind") == "receipt":
+            print(
+                f"{row['timestamp']} [receipt] {row['content']} {row['message_id']}"
+            )
+            continue
+        print(f"{row['timestamp']} <{row['sender']}> {row['content']}")
     return 0

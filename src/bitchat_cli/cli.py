@@ -9,6 +9,8 @@ from .app import (
     run_daemon_start,
     run_daemon_status,
     run_daemon_stop,
+    run_dm_history,
+    run_dm_inbox,
     run_doctor,
     run_inbox,
     run_peers,
@@ -56,6 +58,20 @@ def build_parser() -> argparse.ArgumentParser:
     peers = subparsers.add_parser("peers", help="Show known peers recorded by the CLI")
     peers.add_argument("--json", action="store_true", help="Output JSON")
     peers.set_defaults(handler=run_peers)
+
+    dm = subparsers.add_parser("dm", help="Inspect direct-message history recorded by the CLI")
+    dm_subparsers = dm.add_subparsers(dest="dm_command", required=True)
+
+    dm_inbox = dm_subparsers.add_parser("inbox", help="List recorded DM conversations")
+    dm_inbox.add_argument("--json", action="store_true", help="Output JSON")
+    dm_inbox.add_argument("--tail", type=int, help="Show only the last N conversations")
+    dm_inbox.set_defaults(handler=run_dm_inbox)
+
+    dm_history = dm_subparsers.add_parser("history", help="Show DM history for one peer")
+    dm_history.add_argument("target", help="Peer ID or @nickname")
+    dm_history.add_argument("--json", action="store_true", help="Output JSON")
+    dm_history.add_argument("--tail", type=int, help="Show only the last N rows")
+    dm_history.set_defaults(handler=run_dm_history)
 
     selftest = subparsers.add_parser("selftest", help="Run offline protocol checks")
     selftest.set_defaults(handler=run_selftest)

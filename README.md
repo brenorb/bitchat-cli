@@ -10,14 +10,13 @@ Current scope:
 - Public broadcast chat with persistent local identity
 - Central-role BLE transport using `bleak`
 - Inbound fragment reassembly and outbound packet fragmentation for oversized BLE payloads
-- Official private-message TLV framing and Noise payload helpers for future DM transport
+- Direct BLE private messaging over Noise XX with lazy handshake
 - Official Noise XX session primitives validated against the macOS app's test vectors
+- Private-message history capture plus `dm inbox` / `dm history`
 - Offline protocol self-tests
 
 Not implemented in this first cut:
 
-- Noise private messaging
-- Noise private-message transport and CLI commands
 - Multi-hop relay participation
 - BLE peripheral advertising
 - File transfer
@@ -36,6 +35,7 @@ Inside chat:
 - `/help`
 - `/name <nickname>`
 - `/who`
+- `/msg <@nickname|peer_id> <message>`
 - `/clear`
 - `/quit`
 
@@ -51,6 +51,8 @@ uv run bitchat daemon start --nickname breno
 uv run bitchat daemon status
 uv run bitchat peers
 uv run bitchat inbox --tail 20
+uv run bitchat dm inbox
+uv run bitchat dm history @bubbles
 uv run bitchat daemon stop
 ```
 
@@ -67,6 +69,8 @@ Behavior notes:
 - The daemon now follows the macOS app's basic scanning shape: duty-cycled
   background scanning instead of a tight `discover()` loop.
 - `inbox` deduplicates repeated deliveries of the same signed BitChat packet.
+- Private messages are persisted separately from the public inbox and exposed
+  through `bitchat dm inbox` and `bitchat dm history`.
 - Only one CLI BLE session can own the radio at a time, so `chat` and `daemon`
   no longer run concurrently.
 

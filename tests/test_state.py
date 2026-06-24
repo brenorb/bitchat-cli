@@ -63,6 +63,32 @@ def test_message_store_can_deduplicate_records_for_inbox_views(tmp_path: Path) -
     assert rows[0]["message_id"] == "sig:1234"
 
 
+def test_message_store_persists_scope_and_conversation_metadata(tmp_path: Path) -> None:
+    store = MessageStore(tmp_path / "messages.jsonl")
+    ts = datetime(2026, 6, 24, 1, 0, 0, tzinfo=timezone.utc)
+    store.append(
+        direction="inbound",
+        sender="bubbles",
+        content="secret hello",
+        timestamp=ts,
+        peer_id="abcd",
+        message_id="dm-1",
+        scope="dm",
+        conversation_id="abcd",
+        message_kind="private_message",
+        target_peer_id="abcd",
+        delivery_state="delivered",
+    )
+
+    rows = store.read_all()
+
+    assert rows[0]["scope"] == "dm"
+    assert rows[0]["conversation_id"] == "abcd"
+    assert rows[0]["message_kind"] == "private_message"
+    assert rows[0]["target_peer_id"] == "abcd"
+    assert rows[0]["delivery_state"] == "delivered"
+
+
 def test_peer_store_upserts_and_merges_addresses(tmp_path: Path) -> None:
     store = PeerStore(tmp_path / "peers.json")
     identity = Identity.generate()

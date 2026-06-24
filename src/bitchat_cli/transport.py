@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable
+from uuid import uuid4
 
 from bleak import BleakClient, BleakScanner
 
@@ -13,12 +14,29 @@ from .constants import CHARACTERISTIC_UUID, MAX_PACKET_SIZE, SERVICE_UUID, Messa
 from .crypto import Identity, peer_id_from_noise_public_key
 from .dedupe import ExpiringSet, packet_cache_key
 from .fragments import FragmentAssemblyBuffer, fragment_packet_sequence
-from .protocol import Announcement, Packet, make_announce_packet, make_leave_packet, make_public_message_packet
+from .noise import NoiseError, NoiseSession
+from .protocol import (
+    Announcement,
+    NoisePayload,
+    NoisePayloadType,
+    Packet,
+    PrivateMessagePacket,
+    make_announce_packet,
+    make_delivered_payload,
+    make_leave_packet,
+    make_noise_encrypted_packet,
+    make_noise_handshake_packet,
+    make_public_message_packet,
+)
 
 
 SystemLogger = Callable[[str], None]
 MessageLogger = Callable[[str, str, datetime, str | None, str | None], None]
 PeerLogger = Callable[["PeerRecord"], None]
+PrivateMessageLogger = Callable[[str, str, datetime, str, str], None]
+ReceiptLogger = Callable[[str, str, str, datetime], None]
+
+_MAX_PENDING_NOISE_PAYLOADS_PER_PEER = 32
 
 
 @dataclass(slots=True)
@@ -40,6 +58,8 @@ class BLEChatTransport:
         system_log: SystemLogger,
         message_log: MessageLogger,
         peer_log: PeerLogger | None = None,
+        private_message_log: PrivateMessageLogger | None = None,
+        receipt_log: ReceiptLogger | None = None,
         scan_interval: float = 5.0,
         background_mode: bool = False,
     ) -> None:
@@ -48,11 +68,15 @@ class BLEChatTransport:
         self.system_log = system_log
         self.message_log = message_log
         self.peer_log = peer_log
+        self.private_message_log = private_message_log
+        self.receipt_log = receipt_log
         self.scan_interval = scan_interval
         self.background_mode = background_mode
         self.clients: dict[str, BleakClient] = {}
         self.connecting: set[str] = set()
         self.known_peers: dict[str, PeerRecord] = {}
+        self._noise_sessions: dict[str, NoiseSession] = {}
+        self._pending_noise_payloads: dict[str, deque[bytes]] = {}
         self._recent_own_signatures: deque[str] = deque(maxlen=128)
         self._recent_inbound_messages = ExpiringSet(ttl_seconds=300.0, max_entries=1000)
         self._fragment_buffer = FragmentAssemblyBuffer()
@@ -99,6 +123,32 @@ class BLEChatTransport:
     def list_peers(self) -> list[PeerRecord]:
         return sorted(self.known_peers.values(), key=lambda peer: (peer.nickname.lower(), peer.peer_id))
 
+    def seed_known_peers(self, rows: list[dict[str, object]]) -> None:
+        for row in rows:
+            peer_id = str(row.get("peer_id") or "").strip()
+            if not peer_id or peer_id in self.known_peers:
+                continue
+            try:
+                noise_public_key = bytes.fromhex(str(row.get("noise_public_key") or ""))
+                signing_public_key = bytes.fromhex(str(row.get("signing_public_key") or ""))
+            except ValueError:
+                continue
+            if len(noise_public_key) != 32 or len(signing_public_key) != 32:
+                continue
+            last_seen_raw = str(row.get("last_seen") or "")
+            try:
+                last_seen = datetime.fromisoformat(last_seen_raw)
+            except ValueError:
+                last_seen = datetime.now(timezone.utc)
+            self.known_peers[peer_id] = PeerRecord(
+                peer_id=peer_id,
+                nickname=str(row.get("nickname") or peer_id[:8]),
+                noise_public_key=noise_public_key,
+                signing_public_key=signing_public_key,
+                addresses={str(item) for item in row.get("addresses", []) if str(item)},
+                last_seen=last_seen,
+            )
+
     async def set_nickname(self, nickname: str) -> None:
         self.nickname = nickname
         await self._broadcast_packet(make_announce_packet(self.identity, nickname))
@@ -106,6 +156,23 @@ class BLEChatTransport:
     async def send_public_message(self, content: str) -> None:
         packet = make_public_message_packet(self.identity, content)
         await self._broadcast_packet(packet)
+
+    async def send_private_message(
+        self,
+        peer_id: str,
+        content: str,
+        *,
+        message_id: str | None = None,
+    ) -> str:
+        if peer_id not in self.known_peers:
+            raise ValueError(f"unknown peer_id: {peer_id}")
+        resolved_message_id = message_id or str(uuid4())
+        typed_payload = NoisePayload(
+            payload_type=NoisePayloadType.PRIVATE_MESSAGE,
+            payload=PrivateMessagePacket(message_id=resolved_message_id, content=content).encode(),
+        ).encode()
+        await self._send_noise_payload(peer_id, typed_payload)
+        return resolved_message_id
 
     async def _scan_loop(self) -> None:
         try:
@@ -230,6 +297,12 @@ class BLEChatTransport:
         if packet.packet_type == MessageType.MESSAGE:
             await self._handle_message(packet)
             return
+        if packet.packet_type == MessageType.NOISE_HANDSHAKE:
+            await self._handle_noise_handshake(packet)
+            return
+        if packet.packet_type == MessageType.NOISE_ENCRYPTED:
+            await self._handle_noise_encrypted(packet)
+            return
         if packet.packet_type == MessageType.LEAVE:
             self._handle_leave(packet)
             return
@@ -266,6 +339,8 @@ class BLEChatTransport:
             self.peer_log(peer)
         if is_new:
             self.system_log(f"Peer online: {peer.nickname} ({peer.peer_id}).")
+        if claimed_peer_id in self._pending_noise_payloads:
+            await self._initiate_noise_handshake(claimed_peer_id)
 
     async def _handle_message(self, packet: Packet) -> None:
         peer_id = packet.sender_id.hex()
@@ -285,11 +360,210 @@ class BLEChatTransport:
         peer.last_seen = datetime.fromtimestamp(packet.timestamp_ms / 1000, tz=timezone.utc)
         self.message_log(peer.nickname, content, peer.last_seen, peer.peer_id, message_id)
 
+    async def _handle_noise_handshake(self, packet: Packet) -> None:
+        if packet.recipient_id is None or packet.recipient_id.hex() != self.identity.peer_id:
+            return
+        peer_id = packet.sender_id.hex()
+        session = self._noise_sessions.get(peer_id)
+        if session is None or session.is_established():
+            session = NoiseSession(
+                peer_id=peer_id,
+                role="responder",
+                local_static_private_key=self.identity.noise_private_key,
+            )
+            self._noise_sessions[peer_id] = session
+
+        try:
+            response = session.process_handshake_message(packet.payload)
+        except NoiseError as exc:
+            self.system_log(f"Ignored noise handshake from {peer_id}: {exc}")
+            return
+
+        if response:
+            await self._send_packet_to_peer(
+                peer_id,
+                make_noise_handshake_packet(self.identity, peer_id, response),
+            )
+        if session.is_established():
+            await self._flush_pending_noise_payloads(peer_id)
+
+    async def _handle_noise_encrypted(self, packet: Packet) -> None:
+        if packet.recipient_id is None or packet.recipient_id.hex() != self.identity.peer_id:
+            return
+        peer_id = packet.sender_id.hex()
+        session = self._noise_sessions.get(peer_id)
+        if session is None or not session.is_established():
+            await self._initiate_noise_handshake(peer_id)
+            return
+
+        try:
+            decrypted = session.decrypt(packet.payload)
+        except NoiseError as exc:
+            self.system_log(f"Failed to decrypt private payload from {peer_id}: {exc}")
+            session.reset()
+            self._noise_sessions.pop(peer_id, None)
+            await self._initiate_noise_handshake(peer_id)
+            return
+
+        peer = self.known_peers.get(peer_id)
+        timestamp = datetime.fromtimestamp(packet.timestamp_ms / 1000, tz=timezone.utc)
+        if peer is not None:
+            peer.last_seen = timestamp
+            if self.peer_log is not None:
+                self.peer_log(peer)
+
+        try:
+            noise_payload = NoisePayload.decode(decrypted)
+        except ValueError as exc:
+            self.system_log(f"Ignored invalid private payload from {peer_id}: {exc}")
+            return
+
+        if noise_payload.payload_type == NoisePayloadType.PRIVATE_MESSAGE:
+            await self._handle_private_message_payload(peer_id, noise_payload.payload, timestamp)
+            return
+        if noise_payload.payload_type == NoisePayloadType.DELIVERED:
+            self._handle_receipt_payload(peer_id, "delivered", noise_payload.payload, timestamp)
+            return
+        if noise_payload.payload_type == NoisePayloadType.READ_RECEIPT:
+            self._handle_receipt_payload(peer_id, "read_receipt", noise_payload.payload, timestamp)
+            return
+
+    async def _handle_private_message_payload(
+        self,
+        peer_id: str,
+        payload: bytes,
+        timestamp: datetime,
+    ) -> None:
+        try:
+            private_message = PrivateMessagePacket.decode(payload)
+        except ValueError as exc:
+            self.system_log(f"Ignored invalid private message from {peer_id}: {exc}")
+            return
+        dedupe_key = f"dm:{peer_id}:{private_message.message_id}"
+        if self._recent_inbound_messages.mark_seen(dedupe_key):
+            return
+
+        peer = self.known_peers.get(peer_id)
+        sender = peer.nickname if peer is not None else peer_id[:8]
+        if self.private_message_log is not None:
+            self.private_message_log(
+                sender,
+                private_message.content,
+                timestamp,
+                peer_id,
+                private_message.message_id,
+            )
+        else:
+            self.system_log(f"[dm] <{sender}> {private_message.content}")
+
+        await self._send_noise_payload(peer_id, make_delivered_payload(private_message.message_id))
+
+    def _handle_receipt_payload(
+        self,
+        peer_id: str,
+        receipt_type: str,
+        payload: bytes,
+        timestamp: datetime,
+    ) -> None:
+        try:
+            message_id = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            self.system_log(f"Ignored invalid {receipt_type} payload from {peer_id}.")
+            return
+        dedupe_key = f"receipt:{receipt_type}:{peer_id}:{message_id}"
+        if self._recent_inbound_messages.mark_seen(dedupe_key):
+            return
+        if self.receipt_log is not None:
+            self.receipt_log(peer_id, receipt_type, message_id, timestamp)
+
     def _handle_leave(self, packet: Packet) -> None:
         peer_id = packet.sender_id.hex()
         peer = self.known_peers.get(peer_id)
         if peer is not None:
             self.system_log(f"Peer left: {peer.nickname} ({peer.peer_id}).")
+
+    async def _send_noise_payload(self, peer_id: str, typed_payload: bytes) -> None:
+        session = self._noise_sessions.get(peer_id)
+        if session is not None and session.is_established():
+            try:
+                await self._send_encrypted_payload_now(peer_id, typed_payload)
+                return
+            except NoiseError:
+                session.reset()
+                self._noise_sessions.pop(peer_id, None)
+
+        self._queue_noise_payload(peer_id, typed_payload)
+        await self._initiate_noise_handshake(peer_id)
+
+    def _queue_noise_payload(self, peer_id: str, typed_payload: bytes) -> None:
+        queue = self._pending_noise_payloads.setdefault(
+            peer_id,
+            deque(maxlen=_MAX_PENDING_NOISE_PAYLOADS_PER_PEER),
+        )
+        if len(queue) == queue.maxlen:
+            queue.popleft()
+            self.system_log(f"Dropped oldest pending private payload for {peer_id} due to queue limit.")
+        queue.append(typed_payload)
+
+    async def _flush_pending_noise_payloads(self, peer_id: str) -> None:
+        queue = self._pending_noise_payloads.get(peer_id)
+        if not queue:
+            return
+        while queue:
+            typed_payload = queue.popleft()
+            try:
+                await self._send_encrypted_payload_now(peer_id, typed_payload)
+            except NoiseError as exc:
+                queue.appendleft(typed_payload)
+                self.system_log(f"Paused pending private payload flush for {peer_id}: {exc}")
+                break
+        if not queue:
+            self._pending_noise_payloads.pop(peer_id, None)
+
+    async def _send_encrypted_payload_now(self, peer_id: str, typed_payload: bytes) -> None:
+        session = self._noise_sessions.get(peer_id)
+        if session is None or not session.is_established():
+            raise NoiseError("session is not established")
+        encrypted = session.encrypt(typed_payload)
+        sent = await self._send_packet_to_peer(
+            peer_id,
+            make_noise_encrypted_packet(self.identity, peer_id, encrypted),
+        )
+        if sent is False:
+            raise NoiseError("no connected link to peer")
+
+    async def _initiate_noise_handshake(self, peer_id: str) -> None:
+        session = self._noise_sessions.get(peer_id)
+        if session is None:
+            session = NoiseSession(
+                peer_id=peer_id,
+                role="initiator",
+                local_static_private_key=self.identity.noise_private_key,
+            )
+            self._noise_sessions[peer_id] = session
+        if session.is_established() or session.is_handshaking():
+            return
+        handshake_payload = session.start_handshake()
+        if handshake_payload:
+            sent = await self._send_packet_to_peer(
+                peer_id,
+                make_noise_handshake_packet(self.identity, peer_id, handshake_payload),
+            )
+            if sent is False:
+                session.reset()
+                self._noise_sessions.pop(peer_id, None)
+
+    async def _send_packet_to_peer(self, peer_id: str, packet: Packet) -> bool:
+        peer = self.known_peers.get(peer_id)
+        if peer is None:
+            self.system_log(f"Unknown peer_id for direct packet: {peer_id}")
+            return False
+        target_clients = [self.clients[address] for address in sorted(peer.addresses) if address in self.clients]
+        if not target_clients:
+            self.system_log(f"No connected BitChat link to {peer.nickname} ({peer.peer_id}).")
+            return False
+        await asyncio.gather(*(self._write_packet(client, packet) for client in target_clients), return_exceptions=True)
+        return True
 
     async def _broadcast_packet(self, packet: Packet) -> None:
         clients = list(self.clients.values())

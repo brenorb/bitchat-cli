@@ -195,6 +195,9 @@ class XXHandshake:
     def handshake_hash(self) -> bytes:
         return self._symmetric_state.handshake_hash
 
+    def is_complete(self) -> bool:
+        return self._current_pattern >= len(_XX_MESSAGE_PATTERNS)
+
     def write_message(self, payload: bytes = b"") -> bytes:
         if len(payload) > MAX_HANDSHAKE_MESSAGE_SIZE:
             raise NoiseError("handshake payload too large")
@@ -301,3 +304,93 @@ _XX_MESSAGE_PATTERNS = [
     ("e", "ee", "s", "es"),
     ("s", "se"),
 ]
+
+
+class NoiseSession:
+    def __init__(
+        self,
+        *,
+        peer_id: str,
+        role: str,
+        local_static_private_key: x25519.X25519PrivateKey,
+        remote_static_public_key: x25519.X25519PublicKey | None = None,
+    ) -> None:
+        if role not in {"initiator", "responder"}:
+            raise NoiseError("role must be initiator or responder")
+        self.peer_id = peer_id
+        self.role = role
+        self.local_static_private_key = local_static_private_key
+        self.remote_static_public_key = remote_static_public_key
+        self._state = "uninitialized"
+        self._handshake: XXHandshake | None = None
+        self._send_cipher: CipherState | None = None
+        self._receive_cipher: CipherState | None = None
+
+    def start_handshake(self) -> bytes:
+        if self._state != "uninitialized":
+            raise NoiseError("handshake already started")
+        self._handshake = XXHandshake(
+            role=self.role,
+            local_static_private_key=self.local_static_private_key,
+            remote_static_public_key=self.remote_static_public_key,
+        )
+        self._state = "handshaking"
+        if self.role == "initiator":
+            return self._handshake.write_message()
+        return b""
+
+    def process_handshake_message(self, message: bytes) -> bytes | None:
+        if self._state == "uninitialized" and self.role == "responder":
+            self._handshake = XXHandshake(
+                role=self.role,
+                local_static_private_key=self.local_static_private_key,
+                remote_static_public_key=self.remote_static_public_key,
+            )
+            self._state = "handshaking"
+        if self._state != "handshaking" or self._handshake is None:
+            raise NoiseError("handshake is not active")
+
+        self._handshake.read_message(message)
+        if self._handshake.is_complete():
+            self._finalize_handshake()
+            return None
+
+        response = self._handshake.write_message()
+        if self._handshake.is_complete():
+            self._finalize_handshake()
+        return response
+
+    def is_established(self) -> bool:
+        return self._state == "established"
+
+    def is_handshaking(self) -> bool:
+        return self._state == "handshaking"
+
+    def has_session(self) -> bool:
+        return self._state != "uninitialized"
+
+    def encrypt(self, plaintext: bytes) -> bytes:
+        if self._state != "established" or self._send_cipher is None:
+            raise NoiseError("session is not established")
+        return self._send_cipher.encrypt(plaintext)
+
+    def decrypt(self, ciphertext: bytes) -> bytes:
+        if self._state != "established" or self._receive_cipher is None:
+            raise NoiseError("session is not established")
+        return self._receive_cipher.decrypt(ciphertext)
+
+    def reset(self) -> None:
+        self._state = "uninitialized"
+        self._handshake = None
+        self._send_cipher = None
+        self._receive_cipher = None
+
+    def _finalize_handshake(self) -> None:
+        if self._handshake is None:
+            raise NoiseError("handshake is not active")
+        self._send_cipher, self._receive_cipher = self._handshake.transport_ciphers(
+            use_extracted_nonce=True
+        )
+        self.remote_static_public_key = self._handshake.remote_static_public_key
+        self._handshake = None
+        self._state = "established"

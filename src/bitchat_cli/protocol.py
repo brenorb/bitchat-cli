@@ -383,3 +383,35 @@ def make_delivered_payload(message_id: str) -> bytes:
         payload_type=NoisePayloadType.DELIVERED,
         payload=message_id.encode("utf-8"),
     ).encode()
+
+
+def make_noise_handshake_packet(
+    identity: Identity,
+    recipient_peer_id: str,
+    payload: bytes,
+    *,
+    timestamp_ms: int | None = None,
+) -> Packet:
+    return Packet(
+        packet_type=MessageType.NOISE_HANDSHAKE,
+        sender_id=bytes.fromhex(identity.peer_id),
+        recipient_id=bytes.fromhex(recipient_peer_id),
+        payload=payload,
+        timestamp_ms=timestamp_ms or int(time.time() * 1000),
+    )
+
+
+def make_noise_encrypted_packet(
+    identity: Identity,
+    recipient_peer_id: str,
+    payload: bytes,
+    *,
+    timestamp_ms: int | None = None,
+) -> Packet:
+    return Packet(
+        packet_type=MessageType.NOISE_ENCRYPTED,
+        sender_id=bytes.fromhex(identity.peer_id),
+        recipient_id=bytes.fromhex(recipient_peer_id),
+        payload=payload,
+        timestamp_ms=timestamp_ms or int(time.time() * 1000),
+    )
