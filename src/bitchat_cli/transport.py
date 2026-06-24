@@ -49,6 +49,7 @@ _STALE_RECONNECT_RETENTION_SECONDS = 300.0
 _MAX_FUTURE_TIMESTAMP_SKEW_SECONDS = 120.0
 _MAX_BROADCAST_PACKET_AGE_SECONDS = 900.0
 _SYNC_PUBLIC_MESSAGE_CAPACITY = 256
+_SYNC_FRAGMENT_CAPACITY = 512
 _BACKGROUND_CONNECTED_SCAN_OFF_SECONDS = 30.0
 _BACKGROUND_IDLE_SCAN_OFF_SECONDS = 60.0
 _BACKGROUND_IDLE_THRESHOLD_SECONDS = 60.0
@@ -103,6 +104,7 @@ class BLEChatTransport:
         self._reconnect_ready_at: dict[str, float] = {}
         self._sync_announcements_by_peer: dict[str, Packet] = {}
         self._sync_public_messages: dict[str, Packet] = {}
+        self._sync_fragments: dict[str, Packet] = {}
         self._request_sync_manager = RequestSyncManager()
         self._scan_task: asyncio.Task[None] | None = None
         self._connect_queue: asyncio.Queue[object] | None = None
@@ -464,6 +466,7 @@ class BLEChatTransport:
             return
 
         if packet.packet_type == MessageType.FRAGMENT:
+            self._remember_sync_packet(packet)
             await self._relay_if_needed(address, packet)
             try:
                 reassembled = self._fragment_buffer.append(packet)
@@ -827,6 +830,13 @@ class BLEChatTransport:
         if packet.packet_type == MessageType.ANNOUNCE:
             self._sync_announcements_by_peer[packet.sender_id.hex()] = packet
             return
+        if packet.packet_type == MessageType.FRAGMENT:
+            packet_id_hex = packet_sync_id(packet).hex()
+            self._sync_fragments[packet_id_hex] = packet
+            while len(self._sync_fragments) > _SYNC_FRAGMENT_CAPACITY:
+                oldest_key = next(iter(self._sync_fragments))
+                self._sync_fragments.pop(oldest_key, None)
+            return
         if packet.packet_type != MessageType.MESSAGE:
             return
         packet_id_hex = packet_sync_id(packet).hex()
@@ -841,6 +851,8 @@ class BLEChatTransport:
             ids.extend(packet_sync_id(packet) for packet in self._sync_announcements_by_peer.values())
         if types.contains(MessageType.MESSAGE):
             ids.extend(packet_sync_id(packet) for packet in self._sync_public_messages.values())
+        if types.contains(MessageType.FRAGMENT):
+            ids.extend(packet_sync_id(packet) for packet in self._sync_fragments.values())
         return ids
 
     def _sync_response_candidates(self, types: SyncTypeFlags) -> list[Packet]:
@@ -849,6 +861,8 @@ class BLEChatTransport:
             packets.extend(self._sync_announcements_by_peer.values())
         if types.contains(MessageType.MESSAGE):
             packets.extend(self._sync_public_messages.values())
+        if types.contains(MessageType.FRAGMENT):
+            packets.extend(self._sync_fragments.values())
         return packets
 
     def _prune_runtime_state(
@@ -1008,6 +1022,7 @@ class BLEChatTransport:
 
         fragments = fragment_packet_sequence(packet)
         for index, fragment in enumerate(fragments):
+            self._remember_sync_packet(fragment)
             await client.write_gatt_char(CHARACTERISTIC_UUID, fragment.encode(padding=False), response=False)
             if index + 1 < len(fragments):
                 await asyncio.sleep(0.03)

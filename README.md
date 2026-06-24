@@ -14,7 +14,7 @@ Current scope:
 - Direct BLE private messaging over Noise XX with lazy handshake
 - Official Noise XX session primitives validated against the macOS app's test vectors
 - Duplicate-safe multi-hop relay for public traffic and directed Noise packets
-- Local public-message sync over `REQUEST_SYNC` with official-style `RSR` responses
+- Local public-message and fragment sync over `REQUEST_SYNC` with official-style `RSR` responses
 - Private-message history capture plus `dm inbox` / `dm history`
 - Offline protocol self-tests
 
@@ -91,8 +91,9 @@ Behavior notes:
 - Failed or short-lived BLE links now back off exponentially instead of
   retrying at a near-constant background cadence.
 - Newly seen direct peers get a local-only public sync request, and the CLI can
-  answer `REQUEST_SYNC` packets with cached announces and public messages,
-  marking solicited replay packets with the official `RSR` wire flag.
+  answer `REQUEST_SYNC` packets with cached announces, public messages, and
+  oversized-packet fragments, marking solicited replay packets with the
+  official `RSR` wire flag.
 - The CLI validates `RSR` catch-up packets against the peer that answered the
   sync request, including replayed public messages originally authored by this
   device.

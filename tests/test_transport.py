@@ -556,6 +556,40 @@ def test_fragment_relays_before_full_reassembly() -> None:
     asyncio.run(case())
 
 
+def test_outbound_fragment_write_populates_fragment_sync_cache() -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        transport = _make_transport(
+            identity=local_identity,
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+        )
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.writes: list[bytes] = []
+
+            async def write_gatt_char(self, _characteristic, data: bytes, response: bool = False) -> None:
+                self.writes.append(data)
+
+        oversized = Packet(
+            packet_type=MessageType.MESSAGE,
+            sender_id=bytes.fromhex(local_identity.peer_id),
+            payload=bytes(range(256)) * 4,
+            timestamp_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+        ).sign(local_identity)
+        expected_fragments = fragment_packet_sequence(oversized)
+        client = FakeClient()
+
+        await transport._write_packet(client, oversized)
+
+        assert len(client.writes) == len(expected_fragments)
+        assert len(transport._sync_fragments) == len(expected_fragments)
+
+    asyncio.run(case())
+
+
 def test_disconnect_clears_peer_active_address_and_disconnected_link() -> None:
     transport = _make_transport(
         identity=Identity.generate(),
@@ -977,6 +1011,129 @@ def test_request_sync_filter_suppresses_known_public_packets() -> None:
             m=m,
             data=data,
             types=SyncTypeFlags.from_message_types([MessageType.MESSAGE]),
+        )
+        request_packet = Packet(
+            packet_type=MessageType.REQUEST_SYNC,
+            sender_id=bytes.fromhex(alice_identity.peer_id),
+            recipient_id=bytes.fromhex(local_identity.peer_id),
+            payload=request.encode(),
+            ttl=0,
+        ).sign(alice_identity)
+
+        await transport._handle_decoded_packet("A1", request_packet)
+
+        assert sent_packets == []
+
+    asyncio.run(case())
+
+
+def test_request_sync_returns_missing_fragments() -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        alice_identity = Identity.generate()
+        bob_identity = Identity.generate()
+        transport = _make_transport(
+            identity=local_identity,
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+        )
+        _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="A1")
+        _register_known_peer(transport, peer_identity=bob_identity, nickname="bob", address="B1")
+        transport.clients = {"A1": "A1", "B1": "B1"}  # type: ignore[assignment]
+
+        sent_packets: list[tuple[str, Packet]] = []
+
+        async def fake_send(peer_id: str, packet: Packet) -> bool:
+            sent_packets.append((peer_id, packet))
+            return True
+
+        async def fake_write(_client, _packet: Packet) -> None:
+            return None
+
+        transport._send_packet_to_peer = fake_send  # type: ignore[method-assign]
+        transport._write_packet = fake_write  # type: ignore[method-assign]
+
+        oversized = Packet(
+            packet_type=MessageType.MESSAGE,
+            sender_id=bytes.fromhex(bob_identity.peer_id),
+            payload=bytes(range(256)) * 4,
+            timestamp_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+        ).sign(bob_identity)
+        fragments = fragment_packet_sequence(oversized)
+        for fragment in fragments:
+            await transport._handle_decoded_packet("B1", fragment)
+        sent_packets.clear()
+
+        request = RequestSyncPacket(
+            p=4,
+            m=1,
+            data=b"",
+            types=SyncTypeFlags.from_message_types([MessageType.FRAGMENT]),
+        )
+        request_packet = Packet(
+            packet_type=MessageType.REQUEST_SYNC,
+            sender_id=bytes.fromhex(alice_identity.peer_id),
+            recipient_id=bytes.fromhex(local_identity.peer_id),
+            payload=request.encode(),
+            ttl=0,
+        ).sign(alice_identity)
+
+        await transport._handle_decoded_packet("A1", request_packet)
+
+        assert len(sent_packets) == len(fragments)
+        assert all(peer_id == alice_identity.peer_id for peer_id, _packet in sent_packets)
+        assert all(packet.packet_type == MessageType.FRAGMENT for _peer_id, packet in sent_packets)
+        assert all(packet.ttl == 0 and packet.is_rsr for _peer_id, packet in sent_packets)
+
+    asyncio.run(case())
+
+
+def test_request_sync_filter_suppresses_known_fragments() -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        alice_identity = Identity.generate()
+        bob_identity = Identity.generate()
+        transport = _make_transport(
+            identity=local_identity,
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+        )
+        _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="A1")
+        _register_known_peer(transport, peer_identity=bob_identity, nickname="bob", address="B1")
+        transport.clients = {"A1": "A1", "B1": "B1"}  # type: ignore[assignment]
+
+        sent_packets: list[tuple[str, Packet]] = []
+
+        async def fake_send(peer_id: str, packet: Packet) -> bool:
+            sent_packets.append((peer_id, packet))
+            return True
+
+        async def fake_write(_client, _packet: Packet) -> None:
+            return None
+
+        transport._send_packet_to_peer = fake_send  # type: ignore[method-assign]
+        transport._write_packet = fake_write  # type: ignore[method-assign]
+
+        oversized = Packet(
+            packet_type=MessageType.MESSAGE,
+            sender_id=bytes.fromhex(bob_identity.peer_id),
+            payload=bytes(range(256)) * 4,
+            timestamp_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+        ).sign(bob_identity)
+        fragments = fragment_packet_sequence(oversized)
+        for fragment in fragments:
+            await transport._handle_decoded_packet("B1", fragment)
+        sent_packets.clear()
+
+        fragment_ids = [packet_sync_id(fragment) for fragment in fragments]
+        p, m, data = GCSFilter.build_filter(ids=fragment_ids, max_bytes=128, target_fpr=0.01)
+        request = RequestSyncPacket(
+            p=p,
+            m=m,
+            data=data,
+            types=SyncTypeFlags.from_message_types([MessageType.FRAGMENT]),
         )
         request_packet = Packet(
             packet_type=MessageType.REQUEST_SYNC,
