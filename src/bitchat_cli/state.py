@@ -79,6 +79,10 @@ class RuntimePaths:
         return self.root / "messages.jsonl"
 
     @property
+    def peers_path(self) -> Path:
+        return self.root / "peers.json"
+
+    @property
     def radio_pid_path(self) -> Path:
         return self.root / "radio.pid"
 
@@ -185,3 +189,71 @@ class MessageStore:
             seen.add(key)
             deduplicated.append(row)
         return deduplicated
+
+
+class PeerStore:
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path or RuntimePaths().peers_path
+
+    def upsert(
+        self,
+        *,
+        peer_id: str,
+        nickname: str,
+        noise_public_key: bytes,
+        signing_public_key: bytes,
+        addresses: set[str],
+        last_seen: datetime,
+    ) -> None:
+        peers = {row["peer_id"]: row for row in self.read_all()}
+        existing = peers.get(peer_id)
+        existing_last_seen = None
+        if existing is not None:
+            existing_last_seen = datetime.fromisoformat(existing["last_seen"])
+
+        if existing_last_seen is None or last_seen >= existing_last_seen:
+            nickname_to_store = nickname
+            noise_public_key_to_store = noise_public_key.hex()
+            signing_public_key_to_store = signing_public_key.hex()
+            last_seen_to_store = last_seen.astimezone(timezone.utc).isoformat()
+        else:
+            nickname_to_store = existing["nickname"]
+            noise_public_key_to_store = existing["noise_public_key"]
+            signing_public_key_to_store = existing["signing_public_key"]
+            last_seen_to_store = existing["last_seen"]
+
+        merged_addresses = set(existing.get("addresses", [])) if existing is not None else set()
+        merged_addresses.update(addresses)
+
+        peers[peer_id] = {
+            "peer_id": peer_id,
+            "nickname": nickname_to_store,
+            "noise_public_key": noise_public_key_to_store,
+            "signing_public_key": signing_public_key_to_store,
+            "addresses": sorted(merged_addresses),
+            "last_seen": last_seen_to_store,
+        }
+        self._write_all(list(peers.values()))
+
+    def read_all(self) -> list[dict[str, Any]]:
+        if not self.path.exists():
+            return []
+        rows = json.loads(self.path.read_text(encoding="utf-8"))
+        return sorted(
+            rows,
+            key=lambda row: (
+                row.get("nickname", "").lower(),
+                row.get("peer_id", ""),
+            ),
+        )
+
+    def _write_all(self, rows: list[dict[str, Any]]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        ordered = sorted(
+            rows,
+            key=lambda row: (
+                row.get("nickname", "").lower(),
+                row.get("peer_id", ""),
+            ),
+        )
+        self.path.write_text(json.dumps(ordered, indent=2) + "\n", encoding="utf-8")

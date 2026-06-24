@@ -48,6 +48,7 @@ interactive chat is open:
 ```bash
 uv run bitchat daemon start --nickname breno
 uv run bitchat daemon status
+uv run bitchat peers
 uv run bitchat inbox --tail 20
 uv run bitchat daemon stop
 ```
@@ -56,6 +57,7 @@ Daemon artifacts live under `~/.config/bitchat-cli/`:
 
 - `daemon.log` - background listener log
 - `messages.jsonl` - recorded message history
+- `peers.json` - known peers learned from signed announce packets
 - `daemon.pid` - running daemon pid
 - `radio.pid` - active BLE session guard
 

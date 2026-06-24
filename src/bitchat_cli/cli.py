@@ -11,6 +11,7 @@ from .app import (
     run_daemon_stop,
     run_doctor,
     run_inbox,
+    run_peers,
     run_selftest,
 )
 
@@ -51,6 +52,10 @@ def build_parser() -> argparse.ArgumentParser:
     inbox.add_argument("--json", action="store_true", help="Output JSON")
     inbox.add_argument("--tail", type=int, help="Show only the last N inbound messages")
     inbox.set_defaults(handler=run_inbox)
+
+    peers = subparsers.add_parser("peers", help="Show known peers recorded by the CLI")
+    peers.add_argument("--json", action="store_true", help="Output JSON")
+    peers.set_defaults(handler=run_peers)
 
     selftest = subparsers.add_parser("selftest", help="Run offline protocol checks")
     selftest.set_defaults(handler=run_selftest)

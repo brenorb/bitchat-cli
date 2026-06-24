@@ -18,6 +18,7 @@ from .protocol import Announcement, Packet, make_announce_packet, make_leave_pac
 
 SystemLogger = Callable[[str], None]
 MessageLogger = Callable[[str, str, datetime, str | None, str | None], None]
+PeerLogger = Callable[["PeerRecord"], None]
 
 
 @dataclass(slots=True)
@@ -38,6 +39,7 @@ class BLEChatTransport:
         nickname: str,
         system_log: SystemLogger,
         message_log: MessageLogger,
+        peer_log: PeerLogger | None = None,
         scan_interval: float = 5.0,
         background_mode: bool = False,
     ) -> None:
@@ -45,6 +47,7 @@ class BLEChatTransport:
         self.nickname = nickname
         self.system_log = system_log
         self.message_log = message_log
+        self.peer_log = peer_log
         self.scan_interval = scan_interval
         self.background_mode = background_mode
         self.clients: dict[str, BleakClient] = {}
@@ -259,6 +262,8 @@ class BLEChatTransport:
         peer.last_seen = datetime.fromtimestamp(packet.timestamp_ms / 1000, tz=timezone.utc)
         peer.addresses.add(address)
         self.known_peers[claimed_peer_id] = peer
+        if self.peer_log is not None:
+            self.peer_log(peer)
         if is_new:
             self.system_log(f"Peer online: {peer.nickname} ({peer.peer_id}).")
 

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .constants import CHARACTERISTIC_UUID, SERVICE_UUID
-from .state import ActiveSessionLease, MessageStore, RuntimePaths, StateStore, pid_is_running
+from .state import ActiveSessionLease, MessageStore, PeerStore, RuntimePaths, StateStore, pid_is_running
 from .transport import BLEChatTransport
 
 
@@ -50,6 +50,7 @@ def doctor_payload(store: StateStore) -> dict[str, object]:
             "pid": daemon_pid,
             "log_path": str(paths.daemon_log_path),
             "inbox_path": str(paths.inbox_path),
+            "peers_path": str(paths.peers_path),
         },
         "scope": {
             "public_chat": True,
@@ -80,6 +81,7 @@ def run_doctor(args: argparse.Namespace) -> int:
         print(f"daemon_pid:         {payload['daemon']['pid']}")
     print(f"daemon_log:         {payload['daemon']['log_path']}")
     print(f"inbox_path:         {payload['daemon']['inbox_path']}")
+    print(f"peers_path:         {payload['daemon']['peers_path']}")
     print("scope:")
     for key, value in payload["scope"].items():
         print(f"  {key}: {value}")
@@ -93,6 +95,7 @@ def _build_transport(
     scan_interval: float,
     system_log,
     message_log,
+    peer_log,
     background_mode: bool,
 ) -> BLEChatTransport:
     return BLEChatTransport(
@@ -100,6 +103,7 @@ def _build_transport(
         nickname=nickname,
         system_log=system_log,
         message_log=message_log,
+        peer_log=peer_log,
         scan_interval=scan_interval,
         background_mode=background_mode,
     )
@@ -116,6 +120,7 @@ async def run_chat(args: argparse.Namespace) -> int:
 
     store = StateStore(runtime.state_path)
     message_store = MessageStore(runtime.inbox_path)
+    peer_store = PeerStore(runtime.peers_path)
     state = store.load()
     if args.nickname:
         state.nickname = args.nickname
@@ -142,12 +147,23 @@ async def run_chat(args: argparse.Namespace) -> int:
         )
         print(f"\n[{ts}] <{sender}> {content}", flush=True)
 
+    def peer_log(peer) -> None:
+        peer_store.upsert(
+            peer_id=peer.peer_id,
+            nickname=peer.nickname,
+            noise_public_key=peer.noise_public_key,
+            signing_public_key=peer.signing_public_key,
+            addresses=peer.addresses,
+            last_seen=peer.last_seen,
+        )
+
     try:
         transport = _build_transport(
             identity=state.identity,
             nickname=state.nickname,
             system_log=system_log,
             message_log=message_log,
+            peer_log=peer_log,
             scan_interval=args.scan_interval,
             background_mode=False,
         )
@@ -302,6 +318,7 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
 
     store = StateStore(runtime.state_path)
     message_store = MessageStore(runtime.inbox_path)
+    peer_store = PeerStore(runtime.peers_path)
     state = store.load()
     if args.nickname:
         state.nickname = args.nickname
@@ -331,12 +348,23 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
             line = f"{timestamp.astimezone(timezone.utc).isoformat()} <{sender}> {content}"
             print(line, file=log_handle, flush=True)
 
+        def daemon_peer_log(peer) -> None:
+            peer_store.upsert(
+                peer_id=peer.peer_id,
+                nickname=peer.nickname,
+                noise_public_key=peer.noise_public_key,
+                signing_public_key=peer.signing_public_key,
+                addresses=peer.addresses,
+                last_seen=peer.last_seen,
+            )
+
         runtime.daemon_pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
         transport = _build_transport(
             identity=state.identity,
             nickname=state.nickname,
             system_log=daemon_log,
             message_log=daemon_message_log,
+            peer_log=daemon_peer_log,
             scan_interval=args.scan_interval,
             background_mode=True,
         )
@@ -412,6 +440,7 @@ def run_daemon_start(args: argparse.Namespace) -> int:
     print(f"daemon started (pid {process.pid})")
     print(f"log: {runtime.daemon_log_path}")
     print(f"inbox: {runtime.inbox_path}")
+    print(f"peers: {runtime.peers_path}")
     return 0
 
 
@@ -451,6 +480,7 @@ def run_daemon_status(_args: argparse.Namespace) -> int:
         print(f"daemon running (pid {pid})")
         print(f"log: {runtime.daemon_log_path}")
         print(f"inbox: {runtime.inbox_path}")
+        print(f"peers: {runtime.peers_path}")
         return 0
     print(f"daemon pid file exists but process {pid} is not running")
     return 1
@@ -473,4 +503,19 @@ def run_inbox(args: argparse.Namespace) -> int:
         sender = row["sender"]
         content = row["content"]
         print(f"{timestamp} <{sender}> {content}")
+    return 0
+
+
+def run_peers(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    records = PeerStore(runtime.peers_path).read_all()
+    if args.json:
+        print(json.dumps(records, indent=2))
+        return 0
+    if not records:
+        print("no known peers recorded")
+        return 0
+    for row in records:
+        addresses = ", ".join(row.get("addresses", [])) or "-"
+        print(f"{row['nickname']:16} {row['peer_id']}  {row['last_seen']}  {addresses}")
     return 0
