@@ -264,6 +264,55 @@ def test_run_dm_send_uses_daemon_command_and_resolves_nickname(tmp_path: Path, m
     assert "dm-1" in captured.out
 
 
+def test_run_send_uses_daemon_command(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    seen: list[dict[str, object]] = []
+
+    def fake_send_daemon_command(_runtime: RuntimePaths, payload: dict[str, object]) -> dict[str, object]:
+        seen.append(payload)
+        return {"ok": True}
+
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+    monkeypatch.setattr(app, "_send_daemon_command", fake_send_daemon_command)
+
+    exit_code = app.run_send(argparse.Namespace(message="hello #mesh"))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert seen == [
+        {
+            "command": "public_send",
+            "content": "hello #mesh",
+        }
+    ]
+    assert "queued public message" in captured.out
+
+
+def test_run_daemon_start_uses_repo_src_in_pythonpath(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    seen: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 43210
+
+    def fake_popen(command, **kwargs):
+        seen["command"] = command
+        seen["cwd"] = kwargs["cwd"]
+        seen["env"] = kwargs["env"]
+        return FakeProcess()
+
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+    monkeypatch.setattr(app.subprocess, "Popen", fake_popen)
+
+    exit_code = app.run_daemon_start(argparse.Namespace(nickname="clanker", scan_interval=5.0))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert seen["command"][:3] == [app.sys.executable, "-m", "bitchat_cli.cli"]
+    assert str((Path(app.__file__).resolve().parents[1])) in str(seen["env"]["PYTHONPATH"])
+    assert "43210" in captured.out
+
+
 def test_run_dm_history_emits_read_receipts_for_unread_inbound_messages(tmp_path: Path, monkeypatch, capsys) -> None:
     runtime = RuntimePaths(tmp_path)
     identity = Identity.generate()

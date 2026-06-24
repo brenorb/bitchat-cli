@@ -634,6 +634,21 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                             delivery_state="pending",
                         )
                         response = {"ok": True, "message_id": message_id}
+                elif command == "public_send":
+                    content = str(payload.get("content") or "")
+                    if not content:
+                        response = {"ok": False, "error": "missing content"}
+                    else:
+                        now = datetime.now(timezone.utc)
+                        await transport.send_public_message(content)
+                        message_store.append(
+                            direction="outbound",
+                            sender=state.nickname,
+                            content=content,
+                            timestamp=now,
+                            peer_id=state.identity.peer_id,
+                        )
+                        response = {"ok": True}
                 elif command == "dm_mark_read":
                     peer_id = str(payload.get("peer_id") or "")
                     raw_ids = payload.get("message_ids") or []
@@ -752,11 +767,19 @@ def run_daemon_start(args: argparse.Namespace) -> int:
     ]
     if args.nickname:
         command.extend(["--nickname", args.nickname])
+    env = os.environ.copy()
+    repo_src = str(Path(__file__).resolve().parents[1])
+    pythonpath_parts = [repo_src]
+    existing_pythonpath = env.get("PYTHONPATH")
+    if existing_pythonpath:
+        pythonpath_parts.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
 
     log_handle = runtime.daemon_log_path.open("a", encoding="utf-8")
     process = subprocess.Popen(
         command,
         cwd=str(Path.cwd()),
+        env=env,
         stdin=subprocess.DEVNULL,
         stdout=log_handle,
         stderr=subprocess.STDOUT,
@@ -876,6 +899,23 @@ def run_dm_send(args: argparse.Namespace) -> int:
         print(str(exc))
         return 1
     print(f"queued dm {response['message_id']} to {peer['nickname']} ({peer['peer_id']})")
+    return 0
+
+
+def run_send(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    try:
+        _send_daemon_command(
+            runtime,
+            {
+                "command": "public_send",
+                "content": args.message,
+            },
+        )
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
+    print("queued public message")
     return 0
 
 

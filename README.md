@@ -51,6 +51,7 @@ interactive chat is open:
 ```bash
 uv run bitchat daemon start --nickname breno
 uv run bitchat daemon status
+uv run bitchat send "hello from daemon"
 uv run bitchat peers
 uv run bitchat inbox --tail 20
 uv run bitchat dm send @bubbles "hello from daemon"
@@ -74,7 +75,12 @@ Behavior notes:
 - The daemon now follows the macOS app's basic scanning shape: duty-cycled
   background scanning instead of a tight `discover()` loop, with longer idle
   and connected off-windows to reduce background Bluetooth churn.
-- `inbox` deduplicates repeated deliveries of the same signed BitChat packet.
+- `messages.jsonl` now suppresses repeated writes for the same stable
+  `message_id`, so sync replay after reconnect or restart does not re-persist
+  already recorded public packets, and `inbox` stays deduplicated too.
+- `send` queues a public channel message through the running daemon, so you can
+  test outbound delivery without stopping the background listener to open
+  interactive `chat`.
 - The transport relays signed public packets, oversized packet fragments, and
   directed Noise handshakes/encrypted payloads across connected peers with TTL
   decrement and loop suppression.
