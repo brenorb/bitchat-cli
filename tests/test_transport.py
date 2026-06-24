@@ -18,6 +18,11 @@ class CapturedPacket:
     packet: Packet
 
 
+@dataclass
+class FakeDevice:
+    address: str
+
+
 def _make_transport(
     *,
     identity: Identity,
@@ -691,3 +696,53 @@ def test_future_skewed_announce_is_ignored_before_peer_registration_or_relay() -
         assert any("timestamp skew" in message for message in logs)
 
     asyncio.run(case())
+
+
+def test_connect_worker_drains_enqueued_candidates() -> None:
+    async def case() -> None:
+        transport = _make_transport(
+            identity=Identity.generate(),
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+        )
+        seen: list[str] = []
+
+        async def fake_connect(device) -> None:
+            seen.append(device.address)
+
+        transport._connect_device = fake_connect  # type: ignore[method-assign]
+        transport._connect_queue = asyncio.Queue(maxsize=2)
+        worker = asyncio.create_task(transport._connect_worker())
+
+        transport._enqueue_connect_candidate(FakeDevice("A1"))
+        transport._enqueue_connect_candidate(FakeDevice("B2"))
+        await asyncio.wait_for(transport._connect_queue.join(), timeout=1.0)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        assert seen == ["A1", "B2"]
+
+    asyncio.run(case())
+
+
+def test_connect_enqueue_drops_when_queue_is_full() -> None:
+    logs: list[str] = []
+    transport = BLEChatTransport(
+        identity=Identity.generate(),
+        nickname="local",
+        system_log=logs.append,
+        message_log=lambda *_args: None,
+    )
+    transport._connect_queue = asyncio.Queue(maxsize=1)
+
+    transport._enqueue_connect_candidate(FakeDevice("A1"))
+    transport._enqueue_connect_candidate(FakeDevice("B2"))
+
+    queued = transport._connect_queue.get_nowait()
+
+    assert queued.address == "A1"
+    assert any("Dropped connect candidate" in message for message in logs)

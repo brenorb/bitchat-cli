@@ -83,6 +83,8 @@ Behavior notes:
   dead peer links, and orphaned DM session state do not accumulate forever.
 - Stale public broadcasts / announces and obviously future-skewed packets are
   dropped early instead of consuming relay or session work.
+- BLE discovery now feeds a bounded connect queue instead of spawning an
+  unbounded connect task per discovered device.
 - Private messages are persisted separately from the public inbox and exposed
   through `bitchat dm inbox` and `bitchat dm history`.
 - Only one CLI BLE session can own the radio at a time, so `chat` and `daemon`

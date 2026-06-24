@@ -40,6 +40,8 @@ ReceiptLogger = Callable[[str, str, str, datetime], None]
 _MAX_PENDING_NOISE_PAYLOADS_PER_PEER = 32
 _MAX_NOTIFICATION_QUEUE_SIZE = 256
 _NOTIFICATION_WORKER_COUNT = 1
+_MAX_CONNECT_QUEUE_SIZE = 64
+_CONNECT_WORKER_COUNT = 2
 _RUNTIME_PRUNE_INTERVAL_SECONDS = 30.0
 _STALE_PEER_RETENTION_SECONDS = 900.0
 _STALE_RECONNECT_RETENTION_SECONDS = 300.0
@@ -92,6 +94,9 @@ class BLEChatTransport:
         self._fragment_buffer = FragmentAssemblyBuffer()
         self._reconnect_ready_at: dict[str, float] = {}
         self._scan_task: asyncio.Task[None] | None = None
+        self._connect_queue: asyncio.Queue[object] | None = None
+        self._connect_workers: list[asyncio.Task[None]] = []
+        self._queued_connect_addresses: set[str] = set()
         self._notification_queue: asyncio.Queue[tuple[str, bytes]] | None = None
         self._notification_workers: list[asyncio.Task[None]] = []
         self._scanner: BleakScanner | None = None
@@ -101,6 +106,11 @@ class BLEChatTransport:
 
     async def start(self) -> None:
         self._stop_event.clear()
+        self._connect_queue = asyncio.Queue(maxsize=_MAX_CONNECT_QUEUE_SIZE)
+        self._connect_workers = [
+            asyncio.create_task(self._connect_worker())
+            for _ in range(_CONNECT_WORKER_COUNT)
+        ]
         self._notification_queue = asyncio.Queue(maxsize=_MAX_NOTIFICATION_QUEUE_SIZE)
         self._notification_workers = [
             asyncio.create_task(self._notification_worker())
@@ -124,6 +134,17 @@ class BLEChatTransport:
                 await self._scan_task
             except asyncio.CancelledError:
                 pass
+        connect_workers = list(self._connect_workers)
+        self._connect_workers.clear()
+        for worker in connect_workers:
+            worker.cancel()
+        for worker in connect_workers:
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
+        self._connect_queue = None
+        self._queued_connect_addresses.clear()
         notification_workers = list(self._notification_workers)
         self._notification_workers.clear()
         for worker in notification_workers:
@@ -262,12 +283,16 @@ class BLEChatTransport:
     def _handle_discovered_device(self, device, _advertisement_data) -> None:
         self._prune_runtime_state()
         address = getattr(device, "address", None)
-        if not address or address in self.clients or address in self.connecting:
+        if (
+            not address
+            or address in self.clients
+            or address in self.connecting
+            or address in self._queued_connect_addresses
+        ):
             return
         if not self._can_attempt_reconnect(address):
             return
-        self.connecting.add(address)
-        asyncio.create_task(self._connect_device(device))
+        self._enqueue_connect_candidate(device)
 
     async def _connect_device(self, device) -> None:
         address = device.address
@@ -319,6 +344,34 @@ class BLEChatTransport:
             self._notification_queue.put_nowait((address, data))
         except asyncio.QueueFull:
             self.system_log(f"Dropped inbound packet from {address}: notification queue is full.")
+
+    def _enqueue_connect_candidate(self, device) -> None:
+        address = getattr(device, "address", None)
+        if not address:
+            return
+        if self._connect_queue is None:
+            self.connecting.add(address)
+            asyncio.create_task(self._connect_device(device))
+            return
+        try:
+            self._connect_queue.put_nowait(device)
+            self._queued_connect_addresses.add(address)
+        except asyncio.QueueFull:
+            self.system_log(f"Dropped connect candidate {address}: connect queue is full.")
+
+    async def _connect_worker(self) -> None:
+        if self._connect_queue is None:
+            return
+        while True:
+            device = await self._connect_queue.get()
+            address = getattr(device, "address", None)
+            if address is not None:
+                self._queued_connect_addresses.discard(address)
+                self.connecting.add(address)
+            try:
+                await self._connect_device(device)
+            finally:
+                self._connect_queue.task_done()
 
     async def _notification_worker(self) -> None:
         if self._notification_queue is None:
