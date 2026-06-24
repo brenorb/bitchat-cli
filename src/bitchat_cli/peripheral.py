@@ -23,6 +23,8 @@ class PeripheralEndpoint(Protocol):
 
     def subscriber_addresses(self) -> tuple[str, ...]: ...
 
+    def recent_events(self) -> tuple[dict[str, object], ...]: ...
+
     def is_advertising(self) -> bool: ...
 
     def send(
@@ -45,6 +47,9 @@ class NullPeripheralEndpoint:
         return 0
 
     def subscriber_addresses(self) -> tuple[str, ...]:
+        return ()
+
+    def recent_events(self) -> tuple[dict[str, object], ...]:
         return ()
 
     def is_advertising(self) -> bool:
@@ -184,6 +189,9 @@ def _characteristic_spec(core_bluetooth) -> tuple[int, int]:
     return properties, permissions
 
 
+_RECENT_EVENT_LIMIT = 8
+
+
 class MacOSPeripheralEndpoint:
     def __init__(
         self,
@@ -213,6 +221,7 @@ class MacOSPeripheralEndpoint:
         self._is_advertising = False
         self._subscribed_centrals: dict[str, object] = {}
         self._pending_updates: deque[tuple[bytes, tuple[object, ...] | None]] = deque()
+        self._recent_events: deque[dict[str, object]] = deque(maxlen=_RECENT_EVENT_LIMIT)
         self._characteristic = None
         self._service = None
         self._dispatch_queue = _create_dispatch_queue()
@@ -249,8 +258,19 @@ class MacOSPeripheralEndpoint:
     def subscriber_addresses(self) -> tuple[str, ...]:
         return tuple(sorted(self._subscribed_centrals))
 
+    def recent_events(self) -> tuple[dict[str, object], ...]:
+        return tuple(dict(item) for item in self._recent_events)
+
     def is_advertising(self) -> bool:
         return self._is_advertising
+
+    def _record_recent_event(self, event: str, address: str, **details: object) -> None:
+        item: dict[str, object] = {
+            "event": event,
+            "address": address,
+        }
+        item.update(details)
+        self._recent_events.append(item)
 
     def send(
         self,
@@ -372,11 +392,13 @@ class MacOSPeripheralEndpoint:
     def _handle_subscribe(self, central: object) -> None:
         address = _central_address(central)
         self._subscribed_centrals[address] = central
+        self._record_recent_event("subscribe", address)
         self._loop.call_soon_threadsafe(self._on_subscribe, address)
 
     def _handle_unsubscribe(self, central: object) -> None:
         address = _central_address(central)
         self._subscribed_centrals.pop(address, None)
+        self._record_recent_event("unsubscribe", address)
         self._loop.call_soon_threadsafe(self._on_unsubscribe, address)
 
     def _handle_write_requests(self, manager, requests) -> None:
@@ -405,5 +427,6 @@ class MacOSPeripheralEndpoint:
             value = _objc_attr(request, "value")
             data = bytes(value) if value is not None else b""
             address = _central_address(central)
+            self._record_recent_event("write", address, bytes=len(data))
             self._loop.call_soon_threadsafe(self._on_write, address, data)
             manager.respondToRequest_withResult_(request, self._CoreBluetooth.CBATTErrorSuccess)

@@ -684,6 +684,7 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                             "peripheral_advertising": transport.peripheral_endpoint.is_advertising(),
                             "peripheral_subscribers": transport.peripheral_endpoint.subscriber_count(),
                             "peripheral_addresses": list(transport.peripheral_endpoint.subscriber_addresses()),
+                            "peripheral_recent_events": list(transport.peripheral_endpoint.recent_events()),
                         },
                     }
                 else:
@@ -910,9 +911,24 @@ def run_daemon_status(_args: argparse.Namespace) -> int:
             if isinstance(addresses, list):
                 visible_addresses = ", ".join(str(item) for item in addresses if str(item))
                 print(f"peripheral_addrs: {visible_addresses or '-'}")
+            events = runtime_status.get("peripheral_recent_events")
+            if isinstance(events, list):
+                for event in events:
+                    if isinstance(event, dict):
+                        print(f"peripheral_recent: {_format_peripheral_event(event)}")
         return 0
     print(f"daemon pid file exists but process {pid} is not running")
     return 1
+
+
+def _format_peripheral_event(event: dict[str, object]) -> str:
+    action = str(event.get("event") or "event")
+    address = str(event.get("address") or "?")
+    parts = [action, address]
+    byte_count = event.get("bytes")
+    if isinstance(byte_count, int):
+        parts.append(f"bytes={byte_count}")
+    return " ".join(parts)
 
 
 def run_inbox(args: argparse.Namespace) -> int:

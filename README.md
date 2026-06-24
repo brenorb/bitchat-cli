@@ -87,7 +87,9 @@ Behavior notes:
 - `daemon status` now asks the live daemon for runtime details when the control
   socket is available, including whether peripheral advertising is active, how
   many peripheral subscribers are attached, and which subscriber BLE addresses
-  are currently attached.
+  are currently attached. It also shows a short bounded history of recent
+  peripheral subscribe/unsubscribe/write events to make phone-to-daemon testing
+  debuggable without catching the exact moment live.
 - The macOS peripheral endpoint now exposes the same BLE characteristic surface
   the official app does for inbound writes: notify, read, write, and
   write-without-response.
