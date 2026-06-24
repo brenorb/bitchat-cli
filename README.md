@@ -14,6 +14,7 @@ Current scope:
 - Direct BLE private messaging over Noise XX with lazy handshake
 - Official Noise XX session primitives validated against the macOS app's test vectors
 - Duplicate-safe multi-hop relay for public traffic and directed Noise packets
+- Local public-message sync over `REQUEST_SYNC`
 - Private-message history capture plus `dm inbox` / `dm history`
 - Offline protocol self-tests
 
@@ -86,6 +87,8 @@ Behavior notes:
   dropped early instead of consuming relay or session work.
 - BLE discovery now feeds a bounded connect queue instead of spawning an
   unbounded connect task per discovered device.
+- Newly seen direct peers get a local-only public sync request, and the CLI can
+  answer `REQUEST_SYNC` packets with cached announces and public messages.
 - Private messages are persisted separately from the public inbox and exposed
   through `bitchat dm inbox` and `bitchat dm history`.
 - Only one CLI BLE session can own the radio at a time, so `chat` and `daemon`

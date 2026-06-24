@@ -16,6 +16,7 @@ def test_doctor_payload_reports_mesh_relay_support(tmp_path: Path, monkeypatch) 
     payload = app.doctor_payload(app.StateStore(runtime.state_path))
 
     assert payload["scope"]["mesh_relay"] is True
+    assert payload["scope"]["local_sync"] is True
 
 
 def test_run_peers_lists_persisted_peers(tmp_path: Path, monkeypatch, capsys) -> None:

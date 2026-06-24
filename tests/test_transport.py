@@ -7,7 +7,8 @@ from datetime import datetime, timedelta, timezone
 
 from bitchat_cli.constants import MessageType
 from bitchat_cli.crypto import Identity
-from bitchat_cli.protocol import Announcement, Packet, make_noise_handshake_packet, make_public_message_packet
+from bitchat_cli.protocol import Announcement, Packet, make_announce_packet, make_noise_handshake_packet, make_public_message_packet
+from bitchat_cli.sync import GCSFilter, RequestSyncPacket, SyncTypeFlags, packet_sync_id
 from bitchat_cli.transport import BLEChatTransport, PeerRecord
 from bitchat_cli.fragments import fragment_packet_sequence
 
@@ -770,3 +771,145 @@ def test_announce_packet_includes_connected_direct_neighbors() -> None:
         bytes.fromhex(alice.peer_id),
         bytes.fromhex(bob.peer_id),
     }
+
+
+def test_new_peer_announce_triggers_public_request_sync() -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        alice_identity = Identity.generate()
+        transport = _make_transport(
+            identity=local_identity,
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+        )
+        transport.clients = {"A1": "A1"}  # type: ignore[assignment]
+
+        sent_packets: list[tuple[str, Packet]] = []
+
+        async def fake_send(peer_id: str, packet: Packet) -> bool:
+            sent_packets.append((peer_id, packet))
+            return True
+
+        transport._send_packet_to_peer = fake_send  # type: ignore[method-assign]
+
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        announce = make_announce_packet(alice_identity, "alice", timestamp_ms=now_ms)
+        await transport._handle_decoded_packet("A1", announce)
+
+        assert sent_packets[0][0] == alice_identity.peer_id
+        assert sent_packets[0][1].packet_type == MessageType.REQUEST_SYNC
+        assert sent_packets[0][1].ttl == 0
+        decoded = RequestSyncPacket.decode(sent_packets[0][1].payload)
+        assert decoded is not None
+        assert decoded.types == SyncTypeFlags.PUBLIC_MESSAGES
+
+    asyncio.run(case())
+
+
+def test_request_sync_returns_missing_public_packets() -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        alice_identity = Identity.generate()
+        bob_identity = Identity.generate()
+        transport = _make_transport(
+            identity=local_identity,
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+        )
+        _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="A1")
+        _register_known_peer(transport, peer_identity=bob_identity, nickname="bob", address="B1")
+        transport.clients = {"A1": "A1", "B1": "B1"}  # type: ignore[assignment]
+
+        sent_packets: list[tuple[str, Packet]] = []
+
+        async def fake_send(peer_id: str, packet: Packet) -> bool:
+            sent_packets.append((peer_id, packet))
+            return True
+
+        transport._send_packet_to_peer = fake_send  # type: ignore[method-assign]
+
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        announce = make_announce_packet(bob_identity, "bob", timestamp_ms=now_ms)
+        message = make_public_message_packet(bob_identity, "hello mesh", timestamp_ms=now_ms + 1)
+        await transport._handle_decoded_packet("B1", announce)
+        sent_packets.clear()
+        await transport._handle_decoded_packet("B1", message)
+
+        request = RequestSyncPacket(
+            p=4,
+            m=1,
+            data=b"",
+            types=SyncTypeFlags.PUBLIC_MESSAGES,
+        )
+        request_packet = Packet(
+            packet_type=MessageType.REQUEST_SYNC,
+            sender_id=bytes.fromhex(alice_identity.peer_id),
+            recipient_id=bytes.fromhex(local_identity.peer_id),
+            payload=request.encode(),
+            ttl=0,
+        ).sign(alice_identity)
+
+        await transport._handle_decoded_packet("A1", request_packet)
+
+        assert len(sent_packets) == 2
+        assert all(peer_id == alice_identity.peer_id for peer_id, _packet in sent_packets)
+        assert {packet.packet_type for _peer_id, packet in sent_packets} == {
+            MessageType.ANNOUNCE,
+            MessageType.MESSAGE,
+        }
+        assert all(packet.ttl == 0 for _peer_id, packet in sent_packets)
+
+    asyncio.run(case())
+
+
+def test_request_sync_filter_suppresses_known_public_packets() -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        alice_identity = Identity.generate()
+        bob_identity = Identity.generate()
+        transport = _make_transport(
+            identity=local_identity,
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+        )
+        _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="A1")
+        _register_known_peer(transport, peer_identity=bob_identity, nickname="bob", address="B1")
+        transport.clients = {"A1": "A1", "B1": "B1"}  # type: ignore[assignment]
+
+        sent_packets: list[tuple[str, Packet]] = []
+
+        async def fake_send(peer_id: str, packet: Packet) -> bool:
+            sent_packets.append((peer_id, packet))
+            return True
+
+        transport._send_packet_to_peer = fake_send  # type: ignore[method-assign]
+
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        message = make_public_message_packet(bob_identity, "known message", timestamp_ms=now_ms)
+        await transport._handle_decoded_packet("B1", message)
+        sent_packets.clear()
+
+        packet_id = packet_sync_id(message)
+        p, m, data = GCSFilter.build_filter(ids=[packet_id], max_bytes=128, target_fpr=0.01)
+        request = RequestSyncPacket(
+            p=p,
+            m=m,
+            data=data,
+            types=SyncTypeFlags.from_message_types([MessageType.MESSAGE]),
+        )
+        request_packet = Packet(
+            packet_type=MessageType.REQUEST_SYNC,
+            sender_id=bytes.fromhex(alice_identity.peer_id),
+            recipient_id=bytes.fromhex(local_identity.peer_id),
+            payload=request.encode(),
+            ttl=0,
+        ).sign(alice_identity)
+
+        await transport._handle_decoded_packet("A1", request_packet)
+
+        assert sent_packets == []
+
+    asyncio.run(case())

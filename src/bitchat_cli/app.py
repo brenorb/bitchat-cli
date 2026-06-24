@@ -143,6 +143,7 @@ def doctor_payload(store: StateStore) -> dict[str, object]:
             "public_chat": True,
             "private_noise_chat": True,
             "mesh_relay": True,
+            "local_sync": True,
             "ble_peripheral": False,
             "nostr_geochat": False,
             "fragment_reassembly": True,

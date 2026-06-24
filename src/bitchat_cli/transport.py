@@ -29,6 +29,7 @@ from .protocol import (
     make_public_message_packet,
     make_read_receipt_payload,
 )
+from .sync import GCSFilter, RequestSyncPacket, SyncTypeFlags, packet_sync_id
 
 
 SystemLogger = Callable[[str], None]
@@ -47,6 +48,7 @@ _STALE_PEER_RETENTION_SECONDS = 900.0
 _STALE_RECONNECT_RETENTION_SECONDS = 300.0
 _MAX_FUTURE_TIMESTAMP_SKEW_SECONDS = 120.0
 _MAX_BROADCAST_PACKET_AGE_SECONDS = 900.0
+_SYNC_PUBLIC_MESSAGE_CAPACITY = 256
 
 
 @dataclass(slots=True)
@@ -93,6 +95,8 @@ class BLEChatTransport:
         self._recent_inbound_messages = ExpiringSet(ttl_seconds=300.0, max_entries=1000)
         self._fragment_buffer = FragmentAssemblyBuffer()
         self._reconnect_ready_at: dict[str, float] = {}
+        self._sync_announcements_by_peer: dict[str, Packet] = {}
+        self._sync_public_messages: dict[str, Packet] = {}
         self._scan_task: asyncio.Task[None] | None = None
         self._connect_queue: asyncio.Queue[object] | None = None
         self._connect_workers: list[asyncio.Task[None]] = []
@@ -204,7 +208,29 @@ class BLEChatTransport:
 
     async def send_public_message(self, content: str) -> None:
         packet = make_public_message_packet(self.identity, content)
+        self._remember_sync_packet(packet)
         await self._broadcast_packet(packet)
+
+    async def send_request_sync(
+        self,
+        peer_id: str,
+        *,
+        types: SyncTypeFlags = SyncTypeFlags.PUBLIC_MESSAGES,
+    ) -> bool:
+        if peer_id not in self.known_peers:
+            raise ValueError(f"unknown peer_id: {peer_id}")
+        ids = self._sync_candidate_ids(types)
+        p, m, data = GCSFilter.build_filter(ids=ids, max_bytes=128, target_fpr=0.01)
+        request = RequestSyncPacket(p=p, m=m, data=data, types=types)
+        packet = Packet(
+            packet_type=MessageType.REQUEST_SYNC,
+            sender_id=bytes.fromhex(self.identity.peer_id),
+            recipient_id=bytes.fromhex(peer_id),
+            payload=request.encode(),
+            ttl=0,
+        ).sign(self.identity)
+        sent = await self._send_packet_to_peer(peer_id, packet)
+        return bool(sent)
 
     async def send_private_message(
         self,
@@ -424,6 +450,9 @@ class BLEChatTransport:
         if packet.packet_type == MessageType.NOISE_ENCRYPTED:
             await self._handle_noise_encrypted(packet)
             return
+        if packet.packet_type == MessageType.REQUEST_SYNC:
+            await self._handle_request_sync(packet)
+            return
         if packet.packet_type == MessageType.LEAVE:
             self._handle_leave(packet)
             return
@@ -534,10 +563,12 @@ class BLEChatTransport:
         peer.addresses.add(address)
         peer.active_address = address
         self.known_peers[claimed_peer_id] = peer
+        self._remember_sync_packet(packet)
         if self.peer_log is not None:
             self.peer_log(peer)
         if is_new:
             self.system_log(f"Peer online: {peer.nickname} ({peer.peer_id}).")
+            await self.send_request_sync(claimed_peer_id)
         if claimed_peer_id in self._pending_noise_payloads:
             await self._initiate_noise_handshake(claimed_peer_id)
 
@@ -557,7 +588,43 @@ class BLEChatTransport:
         except UnicodeDecodeError:
             content = packet.payload.decode("utf-8", errors="replace")
         peer.last_seen = datetime.fromtimestamp(packet.timestamp_ms / 1000, tz=timezone.utc)
+        self._remember_sync_packet(packet)
         self.message_log(peer.nickname, content, peer.last_seen, peer.peer_id, message_id)
+
+    async def _handle_request_sync(self, packet: Packet) -> None:
+        if packet.recipient_id is not None and packet.recipient_id.hex() != self.identity.peer_id:
+            return
+        peer_id = packet.sender_id.hex()
+        peer = self.known_peers.get(peer_id)
+        if peer is None:
+            return
+        if not packet.verify_signature(peer.signing_public_key):
+            self.system_log(f"Ignored request sync from {peer.nickname}: invalid signature.")
+            return
+        request = RequestSyncPacket.decode(packet.payload)
+        if request is None:
+            self.system_log(f"Ignored invalid request sync from {peer.nickname}.")
+            return
+
+        sorted_values = GCSFilter.decode_to_sorted_set(p=request.p, m=request.m, data=request.data)
+        requested_types = request.types or SyncTypeFlags.PUBLIC_MESSAGES
+        responses = self._sync_response_candidates(requested_types)
+        for cached_packet in responses:
+            packet_id = packet_sync_id(cached_packet)
+            candidate = GCSFilter.bucket(packet_id, modulus=request.m)
+            if GCSFilter.contains(sorted_values=sorted_values, candidate=candidate):
+                continue
+            response = Packet(
+                packet_type=cached_packet.packet_type,
+                sender_id=cached_packet.sender_id,
+                recipient_id=cached_packet.recipient_id,
+                timestamp_ms=cached_packet.timestamp_ms,
+                payload=cached_packet.payload,
+                signature=cached_packet.signature,
+                ttl=0,
+                version=cached_packet.version,
+            )
+            await self._send_packet_to_peer(peer_id, response)
 
     async def _handle_noise_handshake(self, packet: Packet) -> None:
         if packet.recipient_id is None or packet.recipient_id.hex() != self.identity.peer_id:
@@ -688,6 +755,34 @@ class BLEChatTransport:
                 if peer.active_address == address:
                     peer.active_address = None
 
+    def _remember_sync_packet(self, packet: Packet) -> None:
+        if packet.packet_type == MessageType.ANNOUNCE:
+            self._sync_announcements_by_peer[packet.sender_id.hex()] = packet
+            return
+        if packet.packet_type != MessageType.MESSAGE:
+            return
+        packet_id_hex = packet_sync_id(packet).hex()
+        self._sync_public_messages[packet_id_hex] = packet
+        while len(self._sync_public_messages) > _SYNC_PUBLIC_MESSAGE_CAPACITY:
+            oldest_key = next(iter(self._sync_public_messages))
+            self._sync_public_messages.pop(oldest_key, None)
+
+    def _sync_candidate_ids(self, types: SyncTypeFlags) -> list[bytes]:
+        ids: list[bytes] = []
+        if types.contains(MessageType.ANNOUNCE):
+            ids.extend(packet_sync_id(packet) for packet in self._sync_announcements_by_peer.values())
+        if types.contains(MessageType.MESSAGE):
+            ids.extend(packet_sync_id(packet) for packet in self._sync_public_messages.values())
+        return ids
+
+    def _sync_response_candidates(self, types: SyncTypeFlags) -> list[Packet]:
+        packets: list[Packet] = []
+        if types.contains(MessageType.ANNOUNCE):
+            packets.extend(self._sync_announcements_by_peer.values())
+        if types.contains(MessageType.MESSAGE):
+            packets.extend(self._sync_public_messages.values())
+        return packets
+
     def _prune_runtime_state(
         self,
         *,
@@ -722,6 +817,7 @@ class BLEChatTransport:
             self.known_peers.pop(peer_id, None)
             self._noise_sessions.pop(peer_id, None)
             self._pending_noise_payloads.pop(peer_id, None)
+            self._sync_announcements_by_peer.pop(peer_id, None)
 
     async def _send_noise_payload(self, peer_id: str, typed_payload: bytes) -> None:
         session = self._noise_sessions.get(peer_id)
