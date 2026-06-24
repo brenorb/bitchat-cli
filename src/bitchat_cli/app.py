@@ -16,18 +16,11 @@ from .daemon_client import DaemonClient
 from .files import load_outgoing_file
 from .geochat import (
     GeoChatDaemon,
-    decode_bounds,
-    encode_geohash,
-    encode_geohash_levels,
-    derive_nostr_identity,
     event_committed_pow_difficulty,
     event_display_name,
     event_geohash,
     event_is_teleported,
     event_pow_difficulty,
-    geohash_levels,
-    geohash_precision_for_level,
-    lookup_place,
     normalize_geohash,
 )
 from .network import (
@@ -39,12 +32,11 @@ from .network import (
 )
 from .nostr import NostrDMClient, NostrIdentity, decode_npub
 from .peripheral import create_peripheral_endpoint, peripheral_supported
+from . import queries as query_commands
 from .queries import (
     attachment_summary as _attachment_summary,
-    geohash_participants as _geohash_participants,
     pending_read_receipt_ids as _pending_read_receipt_ids,
     read_dm_records as _read_dm_records,
-    read_public_records as _read_public_records,
     resolve_peer_or_social_target as _resolve_peer_or_social_target,
     resolve_peer_record as _resolve_peer_record,
     resolve_social_record as _resolve_social_record,
@@ -1413,178 +1405,51 @@ def _normalize_geo_target(raw: str) -> str:
 
 
 def run_inbox(args: argparse.Namespace) -> int:
-    runtime = RuntimePaths()
-    records = [
-        row
-        for row in _read_public_records(runtime)
-        if str(row.get("conversation_id") or _MESH_CONVERSATION_ID) == _MESH_CONVERSATION_ID
-    ]
-    if args.tail is not None:
-        records = records[-args.tail :]
-    if args.json:
-        print(json.dumps(records, indent=2))
-        return 0
-    if not records:
-        print("no inbound messages recorded")
-        return 0
-    for row in records:
-        timestamp = row["timestamp"]
-        sender = row["sender"]
-        content = (
-            _attachment_summary(row)
-            if str(row.get("message_kind") or "") in {"public_file", "private_file"}
-            else row["content"]
-        )
-        print(f"{timestamp} #mesh <{sender}> {content}")
-    return 0
+    return query_commands.run_inbox(
+        args,
+        runtime_factory=RuntimePaths,
+        mesh_conversation_id=_MESH_CONVERSATION_ID,
+    )
 
 
 def run_geo_inbox(args: argparse.Namespace) -> int:
-    runtime = RuntimePaths()
-    try:
-        geohash = _normalize_geo_target(args.geohash)
-    except RuntimeError as exc:
-        print(str(exc))
-        return 1
-    records = [
-        row
-        for row in _read_public_records(runtime)
-        if str(row.get("conversation_id") or "") == geohash
-        and str(row.get("message_kind") or "") == "geohash_message"
-    ]
-    if args.tail is not None:
-        records = records[-args.tail :]
-    if args.json:
-        print(json.dumps(records, indent=2))
-        return 0
-    if not records:
-        print(f"no inbound messages recorded for #{geohash}")
-        return 0
-    for row in records:
-        suffixes: list[str] = []
-        if row.get("pow_difficulty") is not None:
-            suffixes.append(f"[{int(row['pow_difficulty'])}b]")
-        if row.get("teleported"):
-            suffixes.append("[teleport]")
-        suffix = f" {' '.join(suffixes)}" if suffixes else ""
-        print(f"{row['timestamp']} #{geohash} <{row['sender']}> {row['content']}{suffix}")
-    return 0
+    return query_commands.run_geo_inbox(
+        args,
+        runtime_factory=RuntimePaths,
+        normalize_geo_target=_normalize_geo_target,
+    )
 
 
 def run_geo_levels(args: argparse.Namespace) -> int:
-    try:
-        levels = geohash_levels(args.geohash)
-    except ValueError as exc:
-        print(str(exc))
-        return 1
-    if args.json:
-        print(json.dumps(levels, indent=2))
-        return 0
-    for level, value in levels.items():
-        print(f"{level:14} #{value}")
-    return 0
+    return query_commands.run_geo_levels(args)
 
 
 def run_geo_encode(args: argparse.Namespace) -> int:
-    try:
-        if args.all_levels:
-            payload = encode_geohash_levels(float(args.lat), float(args.lon))
-        else:
-            level = args.level or "city"
-            payload = {level: encode_geohash(float(args.lat), float(args.lon), precision=geohash_precision_for_level(level))}
-    except ValueError as exc:
-        print(str(exc))
-        return 1
-    if args.json:
-        print(json.dumps(payload, indent=2))
-        return 0
-    for level, value in payload.items():
-        print(f"{level:14} #{value}")
-    return 0
+    return query_commands.run_geo_encode(args)
 
 
 def run_geo_decode(args: argparse.Namespace) -> int:
-    try:
-        geohash = _normalize_geo_target(args.geohash)
-        lat_bounds, lon_bounds = decode_bounds(geohash)
-        center_lat = (lat_bounds[0] + lat_bounds[1]) / 2
-        center_lon = (lon_bounds[0] + lon_bounds[1]) / 2
-    except (RuntimeError, ValueError) as exc:
-        print(str(exc))
-        return 1
-    payload = {
-        "geohash": geohash,
-        "center": {"lat": center_lat, "lon": center_lon},
-        "bounds": {
-            "lat_min": lat_bounds[0],
-            "lat_max": lat_bounds[1],
-            "lon_min": lon_bounds[0],
-            "lon_max": lon_bounds[1],
-        },
-    }
-    if args.json:
-        print(json.dumps(payload, indent=2))
-        return 0
-    print(f"geohash:  #{geohash}")
-    print(f"center:   {center_lat:.6f}, {center_lon:.6f}")
-    print(f"lat:      {lat_bounds[0]:.6f} .. {lat_bounds[1]:.6f}")
-    print(f"lon:      {lon_bounds[0]:.6f} .. {lon_bounds[1]:.6f}")
-    return 0
+    return query_commands.run_geo_decode(
+        args,
+        normalize_geo_target=_normalize_geo_target,
+    )
 
 
 def run_geo_lookup(args: argparse.Namespace) -> int:
-    state = StateStore().load()
-    try:
-        results = lookup_place(
-            args.query,
-            network_config=NetworkConfig.from_state(state),
-            limit=int(args.limit),
-        )
-    except Exception as exc:
-        print(str(exc))
-        return 1
-    if args.json:
-        print(json.dumps(results, indent=2))
-        return 0
-    if not results:
-        print("no place matches found")
-        return 0
-    print("network lookup; no query or coordinates were persisted")
-    for index, row in enumerate(results, start=1):
-        print(f"[{index}] {row['label']}")
-        print(f"    {row['lat']:.6f}, {row['lon']:.6f}")
-        levels = row.get("levels", {})
-        if isinstance(levels, dict):
-            rendered = ", ".join(f"{level}=#{value}" for level, value in levels.items())
-            print(f"    {rendered}")
-    return 0
+    return query_commands.run_geo_lookup(
+        args,
+        state_store_factory=StateStore,
+    )
 
 
 def run_geo_who(args: argparse.Namespace) -> int:
-    runtime = RuntimePaths()
-    try:
-        geohash = _normalize_geo_target(args.geohash)
-    except RuntimeError as exc:
-        print(str(exc))
-        return 1
-    state = StateStore(runtime.state_path).load()
-    participants = _geohash_participants(
-        _read_public_records(runtime),
-        geohash=geohash,
-        self_pubkey=derive_nostr_identity(bytes.fromhex(state.nostr_device_seed_hex), geohash).public_key_hex,
-        now=datetime.now(timezone.utc),
+    return query_commands.run_geo_who(
+        args,
+        runtime_factory=RuntimePaths,
+        state_store_factory=StateStore,
+        now_factory=lambda: datetime.now(timezone.utc),
+        normalize_geo_target=_normalize_geo_target,
     )
-    if args.json:
-        print(json.dumps(participants, indent=2))
-        return 0
-    if not participants:
-        print("no one else is around right now.")
-        return 0
-    print(f"#{geohash} participants")
-    for row in participants:
-        suffix = " teleport" if row.get("teleported") else ""
-        print(f"{row['sender']:20} {row['last_seen']}{suffix}")
-    return 0
 
 
 def run_peers(args: argparse.Namespace) -> int:
@@ -1937,54 +1802,10 @@ def run_geo_watch_list(args: argparse.Namespace) -> int:
 
 
 def run_dm_inbox(args: argparse.Namespace) -> int:
-    runtime = RuntimePaths()
-    peer_rows = PeerStore(runtime.peers_path).read_all()
-    social_rows = _social_store(runtime).read_all()
-    peer_index = {row["peer_id"]: row for row in peer_rows}
-    for row in social_rows:
-        peer_index.setdefault(str(row["peer_id"]), row)
-    conversations: dict[str, dict[str, object]] = {}
-    for row in _read_dm_records(runtime):
-        conversation_id = row.get("conversation_id") or row.get("peer_id") or row.get("target_peer_id")
-        if not conversation_id:
-            continue
-        summary = conversations.setdefault(
-            str(conversation_id),
-            {
-                "conversation_id": str(conversation_id),
-                "peer_id": str(conversation_id),
-                "nickname": peer_index.get(str(conversation_id), {}).get("nickname", str(conversation_id)[:8]),
-                "last_timestamp": "",
-                "last_preview": "",
-            },
-        )
-        timestamp = str(row.get("timestamp") or "")
-        if timestamp >= str(summary["last_timestamp"]):
-            summary["last_timestamp"] = timestamp
-            if row.get("message_kind") == "private_message":
-                summary["last_preview"] = str(row.get("content") or "")
-            elif row.get("message_kind") in {"public_file", "private_file"}:
-                summary["last_preview"] = _attachment_summary(row)
-            else:
-                summary["last_preview"] = str(row.get("content") or row.get("message_kind") or "")
-
-    rows = sorted(
-        conversations.values(),
-        key=lambda row: str(row.get("last_timestamp") or ""),
+    return query_commands.run_dm_inbox(
+        args,
+        runtime_factory=RuntimePaths,
     )
-    if args.tail is not None:
-        rows = rows[-args.tail :]
-    if args.json:
-        print(json.dumps(rows, indent=2))
-        return 0
-    if not rows:
-        print("no direct-message conversations recorded")
-        return 0
-    for row in rows:
-        print(
-            f"{row['nickname']:16} {row['peer_id']}  {row['last_timestamp']}  {row['last_preview']}"
-        )
-    return 0
 
 
 def run_dm_history(args: argparse.Namespace) -> int:
