@@ -616,3 +616,78 @@ def test_prune_runtime_state_removes_stale_peer_and_backoff_entries() -> None:
     fresh_peer = transport.known_peers[fresh_identity.peer_id]
     assert fresh_peer.addresses == {"FRESH"}
     assert fresh_peer.active_address == "FRESH"
+
+
+def test_stale_public_message_is_ignored_before_delivery_or_relay() -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        alice_identity = Identity.generate()
+        charlie_identity = Identity.generate()
+        public_messages: list[tuple[str, str, datetime, str | None, str | None]] = []
+        logs: list[str] = []
+        transport = BLEChatTransport(
+            identity=local_identity,
+            nickname="local",
+            system_log=logs.append,
+            message_log=lambda sender, content, timestamp, peer_id, message_id: public_messages.append(
+                (sender, content, timestamp, peer_id, message_id)
+            ),
+        )
+        _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="A1")
+        _register_known_peer(transport, peer_identity=charlie_identity, nickname="charlie", address="C1")
+        transport.clients = {"A1": "A1", "C1": "C1"}  # type: ignore[assignment]
+
+        relayed_packets: list[tuple[str, Packet]] = []
+
+        async def fake_write(client, packet: Packet) -> None:
+            relayed_packets.append((client, packet))
+
+        transport._write_packet = fake_write  # type: ignore[method-assign]
+
+        stale_timestamp_ms = int((datetime.now(timezone.utc) - timedelta(hours=1)).timestamp() * 1000)
+        packet = make_public_message_packet(alice_identity, "old news", timestamp_ms=stale_timestamp_ms)
+        await transport._handle_decoded_packet("A1", packet)
+
+        assert public_messages == []
+        assert relayed_packets == []
+        assert any("stale" in message for message in logs)
+
+    asyncio.run(case())
+
+
+def test_future_skewed_announce_is_ignored_before_peer_registration_or_relay() -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        alice_identity = Identity.generate()
+        charlie_identity = Identity.generate()
+        logs: list[str] = []
+        transport = BLEChatTransport(
+            identity=local_identity,
+            nickname="local",
+            system_log=logs.append,
+            message_log=lambda *_args: None,
+        )
+        _register_known_peer(transport, peer_identity=charlie_identity, nickname="charlie", address="C1")
+        transport.clients = {"C1": "C1"}  # type: ignore[assignment]
+
+        relayed_packets: list[tuple[str, Packet]] = []
+
+        async def fake_write(client, packet: Packet) -> None:
+            relayed_packets.append((client, packet))
+
+        transport._write_packet = fake_write  # type: ignore[method-assign]
+
+        future_timestamp_ms = int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp() * 1000)
+        packet = make_noise_handshake_packet(
+            alice_identity,
+            local_identity.peer_id,
+            b"hs1",
+            timestamp_ms=future_timestamp_ms,
+        )
+        await transport._handle_decoded_packet("A1", packet)
+
+        assert alice_identity.peer_id not in transport._noise_sessions
+        assert relayed_packets == []
+        assert any("timestamp skew" in message for message in logs)
+
+    asyncio.run(case())

@@ -43,6 +43,8 @@ _NOTIFICATION_WORKER_COUNT = 1
 _RUNTIME_PRUNE_INTERVAL_SECONDS = 30.0
 _STALE_PEER_RETENTION_SECONDS = 900.0
 _STALE_RECONNECT_RETENTION_SECONDS = 300.0
+_MAX_FUTURE_TIMESTAMP_SKEW_SECONDS = 120.0
+_MAX_BROADCAST_PACKET_AGE_SECONDS = 900.0
 
 
 @dataclass(slots=True)
@@ -335,6 +337,11 @@ class BLEChatTransport:
         ):
             return
 
+        rejection_reason = self._ingress_time_rejection(packet)
+        if rejection_reason is not None:
+            self.system_log(rejection_reason)
+            return
+
         packet_key = packet_cache_key(packet)
         if self._recent_seen_packets.mark_seen(packet_key):
             return
@@ -411,6 +418,27 @@ class BLEChatTransport:
             ttl=0,
             version=packet.version,
         )
+
+    def _ingress_time_rejection(self, packet: Packet, *, now: datetime | None = None) -> str | None:
+        current = now or datetime.now(timezone.utc)
+        packet_ts = datetime.fromtimestamp(packet.timestamp_ms / 1000, tz=timezone.utc)
+        future_skew_seconds = (packet_ts - current).total_seconds()
+        if future_skew_seconds > _MAX_FUTURE_TIMESTAMP_SKEW_SECONDS:
+            return (
+                f"Ignored packet from {packet.sender_id.hex()}: timestamp skew "
+                f"{int(future_skew_seconds * 1000)}ms exceeds {int(_MAX_FUTURE_TIMESTAMP_SKEW_SECONDS * 1000)}ms."
+            )
+
+        packet_age_seconds = (current - packet_ts).total_seconds()
+        if packet.packet_type in {MessageType.ANNOUNCE, MessageType.MESSAGE} and (
+            packet.recipient_id is None or packet.packet_type == MessageType.ANNOUNCE
+        ):
+            if packet_age_seconds > _MAX_BROADCAST_PACKET_AGE_SECONDS:
+                return (
+                    f"Ignored stale {MessageType(packet.packet_type).name.lower()} from {packet.sender_id.hex()}: "
+                    f"age {int(packet_age_seconds)}s exceeds {int(_MAX_BROADCAST_PACKET_AGE_SECONDS)}s."
+                )
+        return None
 
     async def _handle_announce(self, address: str, packet: Packet) -> None:
         try:
