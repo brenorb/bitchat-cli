@@ -18,7 +18,7 @@ Current scope:
 - Public and DM file/image transfer with inbound persistence under `~/.config/bitchat-cli/{files,images}/incoming`
 - Official Noise XX session primitives validated against the macOS app's test vectors
 - Duplicate-safe multi-hop relay for public traffic and directed Noise packets
-- Local public-message and fragment sync over `REQUEST_SYNC` with official-style `RSR` responses
+- Local public-message, fragment, and public file-transfer sync over `REQUEST_SYNC` with official-style `RSR` responses
 - Private-message history capture plus `dm inbox` / `dm history`
 - Offline protocol self-tests
 
@@ -159,12 +159,13 @@ Behavior notes:
   unbounded connect task per discovered device.
 - Failed or short-lived BLE links now back off exponentially instead of
   retrying at a near-constant background cadence.
-- Newly seen direct peers get a local-only public sync request, and the CLI can
-  answer `REQUEST_SYNC` packets with cached announces, public messages, and
-  oversized-packet fragments, marking solicited replay packets with the
-  official `RSR` wire flag.
-- Request-sync replay still excludes file transfers, even though live
-  send/receive is now implemented.
+- Newly seen direct peers get a local-only sync request covering announces,
+  public messages, oversized-packet fragments, and public file transfers, and
+  the CLI can answer `REQUEST_SYNC` packets from those caches while marking
+  solicited replay packets with the official `RSR` wire flag.
+- This matches the Apple app's current scope for replayed public file
+  transfers; private file transfers still remain live-only because they travel
+  inside Noise-encrypted DM packets instead of the public gossip sync cache.
 - The CLI validates `RSR` catch-up packets against the peer that answered the
   sync request, including replayed public messages originally authored by this
   device.

@@ -58,8 +58,12 @@ _MAX_FUTURE_TIMESTAMP_SKEW_SECONDS = 120.0
 _MAX_BROADCAST_PACKET_AGE_SECONDS = 900.0
 _SYNC_PUBLIC_MESSAGE_CAPACITY = 256
 _SYNC_FRAGMENT_CAPACITY = 512
+_SYNC_FILE_TRANSFER_CAPACITY = 256
 _SUPPORTED_SYNC_TYPES = SyncTypeFlags.from_message_types(
-    [MessageType.ANNOUNCE, MessageType.MESSAGE, MessageType.FRAGMENT]
+    [MessageType.ANNOUNCE, MessageType.MESSAGE, MessageType.FRAGMENT, MessageType.FILE_TRANSFER]
+)
+_DEFAULT_REQUEST_SYNC_TYPES = SyncTypeFlags.from_message_types(
+    [MessageType.ANNOUNCE, MessageType.MESSAGE, MessageType.FRAGMENT, MessageType.FILE_TRANSFER]
 )
 _BACKGROUND_CONNECTED_SCAN_OFF_SECONDS = 30.0
 _BACKGROUND_IDLE_SCAN_OFF_SECONDS = 60.0
@@ -125,6 +129,7 @@ class BLEChatTransport:
         self._sync_announcements_by_peer: dict[str, Packet] = {}
         self._sync_public_messages: dict[str, Packet] = {}
         self._sync_fragments: dict[str, Packet] = {}
+        self._sync_public_file_transfers: dict[str, Packet] = {}
         self._request_sync_manager = RequestSyncManager()
         self._scan_task: asyncio.Task[None] | None = None
         self._connect_queue: asyncio.Queue[object] | None = None
@@ -259,7 +264,7 @@ class BLEChatTransport:
         self,
         peer_id: str,
         *,
-        types: SyncTypeFlags = SyncTypeFlags.PUBLIC_MESSAGES,
+        types: SyncTypeFlags = _DEFAULT_REQUEST_SYNC_TYPES,
     ) -> bool:
         if peer_id not in self.known_peers:
             raise ValueError(f"unknown peer_id: {peer_id}")
@@ -990,6 +995,13 @@ class BLEChatTransport:
                 oldest_key = next(iter(self._sync_fragments))
                 self._sync_fragments.pop(oldest_key, None)
             return
+        if packet.packet_type == MessageType.FILE_TRANSFER:
+            packet_id_hex = packet_sync_id(packet).hex()
+            self._sync_public_file_transfers[packet_id_hex] = packet
+            while len(self._sync_public_file_transfers) > _SYNC_FILE_TRANSFER_CAPACITY:
+                oldest_key = next(iter(self._sync_public_file_transfers))
+                self._sync_public_file_transfers.pop(oldest_key, None)
+            return
         if packet.packet_type != MessageType.MESSAGE:
             return
         packet_id_hex = packet_sync_id(packet).hex()
@@ -1006,6 +1018,8 @@ class BLEChatTransport:
             ids.extend(packet_sync_id(packet) for packet in self._sync_public_messages.values())
         if types.contains(MessageType.FRAGMENT):
             ids.extend(packet_sync_id(packet) for packet in self._sync_fragments.values())
+        if types.contains(MessageType.FILE_TRANSFER):
+            ids.extend(packet_sync_id(packet) for packet in self._sync_public_file_transfers.values())
         return ids
 
     def _sync_response_candidates(self, types: SyncTypeFlags) -> list[Packet]:
@@ -1016,6 +1030,8 @@ class BLEChatTransport:
             packets.extend(self._sync_public_messages.values())
         if types.contains(MessageType.FRAGMENT):
             packets.extend(self._sync_fragments.values())
+        if types.contains(MessageType.FILE_TRANSFER):
+            packets.extend(self._sync_public_file_transfers.values())
         return packets
 
     def _prune_runtime_state(
