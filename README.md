@@ -51,6 +51,7 @@ uv run bitchat daemon start --nickname breno
 uv run bitchat daemon status
 uv run bitchat peers
 uv run bitchat inbox --tail 20
+uv run bitchat dm send @bubbles "hello from daemon"
 uv run bitchat dm inbox
 uv run bitchat dm history @bubbles
 uv run bitchat daemon stop
@@ -59,6 +60,7 @@ uv run bitchat daemon stop
 Daemon artifacts live under `~/.config/bitchat-cli/`:
 
 - `daemon.log` - background listener log
+- `daemon.sock` - local control socket for `dm send` and read-receipt commands
 - `messages.jsonl` - recorded message history
 - `peers.json` - known peers learned from signed announce packets
 - `daemon.pid` - running daemon pid

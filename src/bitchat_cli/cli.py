@@ -11,6 +11,7 @@ from .app import (
     run_daemon_stop,
     run_dm_history,
     run_dm_inbox,
+    run_dm_send,
     run_doctor,
     run_inbox,
     run_peers,
@@ -72,6 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
     dm_history.add_argument("--json", action="store_true", help="Output JSON")
     dm_history.add_argument("--tail", type=int, help="Show only the last N rows")
     dm_history.set_defaults(handler=run_dm_history)
+
+    dm_send = dm_subparsers.add_parser("send", help="Send one DM through the background daemon")
+    dm_send.add_argument("target", help="Peer ID or @nickname")
+    dm_send.add_argument("message", help="Message body")
+    dm_send.set_defaults(handler=run_dm_send)
 
     selftest = subparsers.add_parser("selftest", help="Run offline protocol checks")
     selftest.set_defaults(handler=run_selftest)

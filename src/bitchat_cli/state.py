@@ -75,6 +75,10 @@ class RuntimePaths:
         return self.root / "daemon.log"
 
     @property
+    def daemon_socket_path(self) -> Path:
+        return self.root / "daemon.sock"
+
+    @property
     def inbox_path(self) -> Path:
         return self.root / "messages.jsonl"
 
@@ -185,15 +189,26 @@ class MessageStore:
         seen: set[str] = set()
         deduplicated: list[dict[str, Any]] = []
         for row in rows:
-            key = row.get("message_id") or "|".join(
-                [
-                    str(row.get("direction")),
-                    str(row.get("peer_id")),
-                    str(row.get("sender")),
-                    str(row.get("timestamp")),
-                    str(row.get("content")),
-                ]
-            )
+            if row.get("message_id"):
+                key = "|".join(
+                    [
+                        str(row.get("scope", "public")),
+                        str(row.get("message_kind", "message")),
+                        str(row.get("direction")),
+                        str(row.get("peer_id")),
+                        str(row.get("message_id")),
+                    ]
+                )
+            else:
+                key = "|".join(
+                    [
+                        str(row.get("direction")),
+                        str(row.get("peer_id")),
+                        str(row.get("sender")),
+                        str(row.get("timestamp")),
+                        str(row.get("content")),
+                    ]
+                )
             if key in seen:
                 continue
             seen.add(key)

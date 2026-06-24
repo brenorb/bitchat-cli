@@ -27,6 +27,7 @@ from .protocol import (
     make_noise_encrypted_packet,
     make_noise_handshake_packet,
     make_public_message_packet,
+    make_read_receipt_payload,
 )
 
 
@@ -173,6 +174,11 @@ class BLEChatTransport:
         ).encode()
         await self._send_noise_payload(peer_id, typed_payload)
         return resolved_message_id
+
+    async def send_read_receipt(self, peer_id: str, message_id: str) -> None:
+        if peer_id not in self.known_peers:
+            raise ValueError(f"unknown peer_id: {peer_id}")
+        await self._send_noise_payload(peer_id, make_read_receipt_payload(message_id))
 
     async def _scan_loop(self) -> None:
         try:

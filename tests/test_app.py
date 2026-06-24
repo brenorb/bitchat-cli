@@ -171,3 +171,108 @@ def test_run_dm_history_filters_one_conversation(tmp_path: Path, monkeypatch, ca
     assert exit_code == 0
     assert "for alice" in captured.out
     assert "for bubbles" not in captured.out
+
+
+def test_run_dm_send_uses_daemon_command_and_resolves_nickname(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    identity = Identity.generate()
+    PeerStore(runtime.peers_path).upsert(
+        peer_id=identity.peer_id,
+        nickname="bubbles",
+        noise_public_key=identity.noise_public_key,
+        signing_public_key=identity.signing_public_key,
+        addresses={"A1"},
+        last_seen=datetime(2026, 6, 24, 0, 9, 44, tzinfo=timezone.utc),
+    )
+    seen: list[dict[str, object]] = []
+
+    def fake_send_daemon_command(_runtime: RuntimePaths, payload: dict[str, object]) -> dict[str, object]:
+        seen.append(payload)
+        return {"ok": True, "message_id": "dm-1"}
+
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+    monkeypatch.setattr(app, "_send_daemon_command", fake_send_daemon_command)
+
+    exit_code = app.run_dm_send(argparse.Namespace(target="@bubbles", message="hello from cli"))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert seen == [
+        {
+            "command": "dm_send",
+            "peer_id": identity.peer_id,
+            "content": "hello from cli",
+        }
+    ]
+    assert "dm-1" in captured.out
+
+
+def test_run_dm_history_emits_read_receipts_for_unread_inbound_messages(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    identity = Identity.generate()
+    peer_store = PeerStore(runtime.peers_path)
+    peer_store.upsert(
+        peer_id=identity.peer_id,
+        nickname="bubbles",
+        noise_public_key=identity.noise_public_key,
+        signing_public_key=identity.signing_public_key,
+        addresses={"A1"},
+        last_seen=datetime(2026, 6, 24, 0, 9, 44, tzinfo=timezone.utc),
+    )
+    store = MessageStore(runtime.inbox_path)
+    store.append(
+        direction="inbound",
+        sender="bubbles",
+        content="first unread",
+        timestamp=datetime(2026, 6, 24, 0, 10, 0, tzinfo=timezone.utc),
+        peer_id=identity.peer_id,
+        message_id="dm-1",
+        scope="dm",
+        conversation_id=identity.peer_id,
+        message_kind="private_message",
+    )
+    store.append(
+        direction="outbound",
+        sender="clanker",
+        content="read_receipt",
+        timestamp=datetime(2026, 6, 24, 0, 10, 1, tzinfo=timezone.utc),
+        peer_id=identity.peer_id,
+        message_id="dm-2",
+        scope="dm",
+        conversation_id=identity.peer_id,
+        message_kind="receipt",
+        target_peer_id=identity.peer_id,
+    )
+    store.append(
+        direction="inbound",
+        sender="bubbles",
+        content="already read",
+        timestamp=datetime(2026, 6, 24, 0, 10, 2, tzinfo=timezone.utc),
+        peer_id=identity.peer_id,
+        message_id="dm-2",
+        scope="dm",
+        conversation_id=identity.peer_id,
+        message_kind="private_message",
+    )
+    seen: list[dict[str, object]] = []
+
+    def fake_send_daemon_command(_runtime: RuntimePaths, payload: dict[str, object]) -> dict[str, object]:
+        seen.append(payload)
+        return {"ok": True, "count": len(payload["message_ids"])}
+
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+    monkeypatch.setattr(app, "_send_daemon_command", fake_send_daemon_command)
+
+    exit_code = app.run_dm_history(argparse.Namespace(target="@bubbles", json=False, tail=None))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "first unread" in captured.out
+    assert "already read" in captured.out
+    assert seen == [
+        {
+            "command": "dm_mark_read",
+            "peer_id": identity.peer_id,
+            "message_ids": ["dm-1"],
+        }
+    ]

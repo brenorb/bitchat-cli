@@ -14,6 +14,7 @@ def test_runtime_paths_are_stable(tmp_path: Path) -> None:
     assert paths.daemon_log_path == tmp_path / "daemon.log"
     assert paths.inbox_path == tmp_path / "messages.jsonl"
     assert paths.peers_path == tmp_path / "peers.json"
+    assert paths.daemon_socket_path == tmp_path / "daemon.sock"
 
 
 def test_message_store_round_trip(tmp_path: Path) -> None:

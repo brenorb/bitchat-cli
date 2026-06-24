@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -63,6 +64,55 @@ def _read_dm_records(runtime: RuntimePaths) -> list[dict[str, object]]:
     return [row for row in rows if row.get("scope") == "dm"]
 
 
+def _send_daemon_command(runtime: RuntimePaths, payload: dict[str, object]) -> dict[str, object]:
+    if not runtime.daemon_socket_path.exists():
+        raise RuntimeError("daemon socket not found; start `bitchat daemon start` first")
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        client.connect(str(runtime.daemon_socket_path))
+        client.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+        response = b""
+        while not response.endswith(b"\n"):
+            chunk = client.recv(4096)
+            if not chunk:
+                break
+            response += chunk
+    except OSError as exc:
+        raise RuntimeError(f"failed to talk to daemon: {exc}") from exc
+    finally:
+        client.close()
+    if not response:
+        raise RuntimeError("daemon returned no response")
+    decoded = json.loads(response.decode("utf-8"))
+    if not decoded.get("ok", False):
+        raise RuntimeError(str(decoded.get("error") or "daemon command failed"))
+    return decoded
+
+
+def _pending_read_receipt_ids(rows: list[dict[str, object]], peer_id: str) -> list[str]:
+    sent = {
+        str(row.get("message_id"))
+        for row in rows
+        if row.get("message_kind") == "receipt"
+        and row.get("direction") == "outbound"
+        and row.get("peer_id") == peer_id
+        and row.get("content") == "read_receipt"
+    }
+    pending: list[str] = []
+    for row in rows:
+        if row.get("message_kind") != "private_message":
+            continue
+        if row.get("direction") != "inbound":
+            continue
+        if row.get("peer_id") != peer_id:
+            continue
+        message_id = str(row.get("message_id") or "")
+        if not message_id or message_id in sent:
+            continue
+        pending.append(message_id)
+    return pending
+
+
 def doctor_payload(store: StateStore) -> dict[str, object]:
     state = store.load()
     paths = RuntimePaths()
@@ -85,6 +135,7 @@ def doctor_payload(store: StateStore) -> dict[str, object]:
             "running": daemon_running,
             "pid": daemon_pid,
             "log_path": str(paths.daemon_log_path),
+            "socket_path": str(paths.daemon_socket_path),
             "inbox_path": str(paths.inbox_path),
             "peers_path": str(paths.peers_path),
         },
@@ -116,6 +167,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     if payload["daemon"]["pid"] is not None:
         print(f"daemon_pid:         {payload['daemon']['pid']}")
     print(f"daemon_log:         {payload['daemon']['log_path']}")
+    print(f"daemon_socket:      {payload['daemon']['socket_path']}")
     print(f"inbox_path:         {payload['daemon']['inbox_path']}")
     print(f"peers_path:         {payload['daemon']['peers_path']}")
     print("scope:")
@@ -531,7 +583,78 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                 delivery_state=receipt_type,
             )
 
+        async def handle_daemon_client(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            try:
+                raw = await reader.readline()
+                if not raw:
+                    return
+                payload = json.loads(raw.decode("utf-8"))
+                command = payload.get("command")
+                if command == "dm_send":
+                    peer_id = str(payload.get("peer_id") or "")
+                    content = str(payload.get("content") or "")
+                    if not peer_id or not content:
+                        response = {"ok": False, "error": "missing peer_id or content"}
+                    else:
+                        message_id = await transport.send_private_message(peer_id, content)
+                        message_store.append(
+                            direction="outbound",
+                            sender=state.nickname,
+                            content=content,
+                            timestamp=datetime.now(timezone.utc),
+                            peer_id=peer_id,
+                            message_id=message_id,
+                            scope="dm",
+                            conversation_id=peer_id,
+                            message_kind="private_message",
+                            target_peer_id=peer_id,
+                            delivery_state="pending",
+                        )
+                        response = {"ok": True, "message_id": message_id}
+                elif command == "dm_mark_read":
+                    peer_id = str(payload.get("peer_id") or "")
+                    raw_ids = payload.get("message_ids") or []
+                    message_ids = [str(item) for item in raw_ids if str(item)]
+                    if not peer_id:
+                        response = {"ok": False, "error": "missing peer_id"}
+                    else:
+                        sent_count = 0
+                        now = datetime.now(timezone.utc)
+                        for message_id in message_ids:
+                            await transport.send_read_receipt(peer_id, message_id)
+                            message_store.append(
+                                direction="outbound",
+                                sender=state.nickname,
+                                content="read_receipt",
+                                timestamp=now,
+                                peer_id=peer_id,
+                                message_id=message_id,
+                                scope="dm",
+                                conversation_id=peer_id,
+                                message_kind="receipt",
+                                target_peer_id=peer_id,
+                            )
+                            sent_count += 1
+                        response = {"ok": True, "count": sent_count}
+                else:
+                    response = {"ok": False, "error": "unknown daemon command"}
+                writer.write((json.dumps(response) + "\n").encode("utf-8"))
+                await writer.drain()
+            except Exception as exc:
+                writer.write((json.dumps({"ok": False, "error": str(exc)}) + "\n").encode("utf-8"))
+                await writer.drain()
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+
         runtime.daemon_pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+        runtime.daemon_socket_path.unlink(missing_ok=True)
         transport = _build_transport(
             identity=state.identity,
             nickname=state.nickname,
@@ -545,6 +668,10 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
         )
         transport_ref["value"] = transport
         transport.seed_known_peers(peer_store.read_all())
+        daemon_server = await asyncio.start_unix_server(
+            handle_daemon_client,
+            path=str(runtime.daemon_socket_path),
+        )
 
         stop_event = asyncio.Event()
 
@@ -564,6 +691,10 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
             signal.signal(signal.SIGTERM, old_sigterm)
         if "transport" in locals():
             await transport.stop()
+        if "daemon_server" in locals():
+            daemon_server.close()
+            await daemon_server.wait_closed()
+        runtime.daemon_socket_path.unlink(missing_ok=True)
         try:
             if runtime.daemon_pid_path.exists():
                 runtime.daemon_pid_path.unlink()
@@ -616,6 +747,7 @@ def run_daemon_start(args: argparse.Namespace) -> int:
     runtime.daemon_pid_path.write_text(f"{process.pid}\n", encoding="utf-8")
     print(f"daemon started (pid {process.pid})")
     print(f"log: {runtime.daemon_log_path}")
+    print(f"socket: {runtime.daemon_socket_path}")
     print(f"inbox: {runtime.inbox_path}")
     print(f"peers: {runtime.peers_path}")
     return 0
@@ -656,6 +788,7 @@ def run_daemon_status(_args: argparse.Namespace) -> int:
     if pid_is_running(pid):
         print(f"daemon running (pid {pid})")
         print(f"log: {runtime.daemon_log_path}")
+        print(f"socket: {runtime.daemon_socket_path}")
         print(f"inbox: {runtime.inbox_path}")
         print(f"peers: {runtime.peers_path}")
         return 0
@@ -699,6 +832,30 @@ def run_peers(args: argparse.Namespace) -> int:
     for row in records:
         addresses = ", ".join(row.get("addresses", [])) or "-"
         print(f"{row['nickname']:16} {row['peer_id']}  {row['last_seen']}  {addresses}")
+    return 0
+
+
+def run_dm_send(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    peer_rows = PeerStore(runtime.peers_path).read_all()
+    try:
+        peer = _resolve_peer_record(peer_rows, args.target)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+    try:
+        response = _send_daemon_command(
+            runtime,
+            {
+                "command": "dm_send",
+                "peer_id": str(peer["peer_id"]),
+                "content": args.message,
+            },
+        )
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
+    print(f"queued dm {response['message_id']} to {peer['nickname']} ({peer['peer_id']})")
     return 0
 
 
@@ -778,4 +935,17 @@ def run_dm_history(args: argparse.Namespace) -> int:
             )
             continue
         print(f"{row['timestamp']} <{row['sender']}> {row['content']}")
+    pending_read_receipts = _pending_read_receipt_ids(rows, conversation_id)
+    if pending_read_receipts:
+        try:
+            _send_daemon_command(
+                runtime,
+                {
+                    "command": "dm_mark_read",
+                    "peer_id": conversation_id,
+                    "message_ids": pending_read_receipts,
+                },
+            )
+        except RuntimeError:
+            pass
     return 0
