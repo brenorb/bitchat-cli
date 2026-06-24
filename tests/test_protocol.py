@@ -1,5 +1,17 @@
+import pytest
+
 from bitchat_cli.crypto import Identity, peer_id_from_noise_public_key
-from bitchat_cli.protocol import Announcement, Packet, make_announce_packet, make_public_message_packet
+from bitchat_cli.protocol import (
+    Announcement,
+    NoisePayload,
+    NoisePayloadType,
+    Packet,
+    PrivateMessagePacket,
+    make_announce_packet,
+    make_delivered_payload,
+    make_public_message_packet,
+    make_read_receipt_payload,
+)
 
 
 def test_announcement_round_trip() -> None:
@@ -58,3 +70,37 @@ def test_announce_packet_signature_and_peer_binding() -> None:
 
     assert decoded.verify_signature(announcement.signing_public_key)
     assert peer_id_from_noise_public_key(announcement.noise_public_key) == identity.peer_id
+
+
+def test_private_message_packet_round_trip() -> None:
+    packet = PrivateMessagePacket(message_id="12345678-1234-1234-1234-123456789abc", content="secret hello")
+
+    encoded = packet.encode()
+    decoded = PrivateMessagePacket.decode(encoded)
+
+    assert decoded == packet
+
+
+def test_private_message_packet_rejects_unknown_tlv_and_truncation() -> None:
+    with pytest.raises(ValueError):
+        PrivateMessagePacket.decode(bytes([0x09, 0x01, 0x61]))
+
+    with pytest.raises(ValueError):
+        PrivateMessagePacket.decode(bytes([0x00, 0x05, 0x61, 0x62]))
+
+
+def test_noise_payload_round_trip_and_receipt_helpers() -> None:
+    private_payload = NoisePayload(
+        payload_type=NoisePayloadType.PRIVATE_MESSAGE,
+        payload=PrivateMessagePacket(message_id="m-1", content="hi").encode(),
+    )
+
+    decoded_private = NoisePayload.decode(private_payload.encode())
+    decoded_delivered = NoisePayload.decode(make_delivered_payload("m-1"))
+    decoded_read = NoisePayload.decode(make_read_receipt_payload("m-1"))
+
+    assert decoded_private == private_payload
+    assert decoded_delivered.payload_type == NoisePayloadType.DELIVERED
+    assert decoded_delivered.payload == b"m-1"
+    assert decoded_read.payload_type == NoisePayloadType.READ_RECEIPT
+    assert decoded_read.payload == b"m-1"

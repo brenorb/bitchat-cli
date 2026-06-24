@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import zlib
 from dataclasses import dataclass, field
+from enum import IntEnum
 
 from .constants import (
     COMPRESSION_THRESHOLD,
@@ -14,6 +15,12 @@ from .constants import (
     MessageType,
 )
 from .crypto import Identity, verify_signature
+
+
+class NoisePayloadType(IntEnum):
+    PRIVATE_MESSAGE = 0x01
+    READ_RECEIPT = 0x02
+    DELIVERED = 0x03
 
 
 def optimal_block_size(data_size: int) -> int:
@@ -119,6 +126,68 @@ class Announcement:
             signing_public_key=signing_public_key,
             direct_neighbors=direct_neighbors,
         )
+
+
+@dataclass(slots=True)
+class PrivateMessagePacket:
+    message_id: str
+    content: str
+
+    def encode(self) -> bytes:
+        message_id_data = self.message_id.encode("utf-8")
+        content_data = self.content.encode("utf-8")
+        if len(message_id_data) > 255:
+            raise ValueError("message_id too long")
+        if len(content_data) > 255:
+            raise ValueError("content too long")
+        return (
+            bytes([0x00, len(message_id_data)])
+            + message_id_data
+            + bytes([0x01, len(content_data)])
+            + content_data
+        )
+
+    @classmethod
+    def decode(cls, data: bytes) -> "PrivateMessagePacket":
+        message_id: str | None = None
+        content: str | None = None
+        offset = 0
+        while offset + 2 <= len(data):
+            tlv_type = data[offset]
+            length = data[offset + 1]
+            offset += 2
+            if offset + length > len(data):
+                raise ValueError("invalid TLV length")
+            value = data[offset : offset + length]
+            offset += length
+            if tlv_type == 0x00:
+                message_id = value.decode("utf-8")
+            elif tlv_type == 0x01:
+                content = value.decode("utf-8")
+            else:
+                raise ValueError("unknown private message TLV")
+        if message_id is None or content is None:
+            raise ValueError("private message missing required fields")
+        return cls(message_id=message_id, content=content)
+
+
+@dataclass(slots=True)
+class NoisePayload:
+    payload_type: NoisePayloadType
+    payload: bytes
+
+    def encode(self) -> bytes:
+        return bytes([self.payload_type]) + self.payload
+
+    @classmethod
+    def decode(cls, data: bytes) -> "NoisePayload":
+        if not data:
+            raise ValueError("noise payload missing type byte")
+        try:
+            payload_type = NoisePayloadType(data[0])
+        except ValueError as exc:
+            raise ValueError("unknown noise payload type") from exc
+        return cls(payload_type=payload_type, payload=bytes(data[1:]))
 
 
 @dataclass(slots=True)
@@ -300,3 +369,17 @@ def make_leave_packet(identity: Identity, *, timestamp_ms: int | None = None) ->
         timestamp_ms=timestamp_ms or int(time.time() * 1000),
     )
     return packet.sign(identity)
+
+
+def make_read_receipt_payload(message_id: str) -> bytes:
+    return NoisePayload(
+        payload_type=NoisePayloadType.READ_RECEIPT,
+        payload=message_id.encode("utf-8"),
+    ).encode()
+
+
+def make_delivered_payload(message_id: str) -> bytes:
+    return NoisePayload(
+        payload_type=NoisePayloadType.DELIVERED,
+        payload=message_id.encode("utf-8"),
+    ).encode()

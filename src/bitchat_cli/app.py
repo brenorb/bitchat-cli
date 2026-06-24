@@ -226,7 +226,17 @@ async def run_chat(args: argparse.Namespace) -> int:
 
 def run_selftest(_args: argparse.Namespace) -> int:
     from .crypto import Identity, peer_id_from_noise_public_key
-    from .protocol import Announcement, Packet, make_announce_packet, make_public_message_packet
+    from .protocol import (
+        Announcement,
+        NoisePayload,
+        NoisePayloadType,
+        Packet,
+        PrivateMessagePacket,
+        make_announce_packet,
+        make_delivered_payload,
+        make_public_message_packet,
+        make_read_receipt_payload,
+    )
 
     identity = Identity.generate()
 
@@ -263,6 +273,19 @@ def run_selftest(_args: argparse.Namespace) -> int:
     decoded_announce_payload = Announcement.decode(decoded_announce_packet.payload)
     assert decoded_announce_packet.verify_signature(decoded_announce_payload.signing_public_key)
     assert peer_id_from_noise_public_key(decoded_announce_payload.noise_public_key) == identity.peer_id
+
+    private_message = PrivateMessagePacket(message_id="m-1", content="hello")
+    decoded_private_message = PrivateMessagePacket.decode(private_message.encode())
+    assert decoded_private_message == private_message
+
+    private_payload = NoisePayload(
+        payload_type=NoisePayloadType.PRIVATE_MESSAGE,
+        payload=private_message.encode(),
+    )
+    decoded_private_payload = NoisePayload.decode(private_payload.encode())
+    assert decoded_private_payload == private_payload
+    assert NoisePayload.decode(make_delivered_payload("m-1")).payload_type == NoisePayloadType.DELIVERED
+    assert NoisePayload.decode(make_read_receipt_payload("m-1")).payload_type == NoisePayloadType.READ_RECEIPT
 
     print("selftest ok")
     return 0

@@ -10,11 +10,13 @@ Current scope:
 - Public broadcast chat with persistent local identity
 - Central-role BLE transport using `bleak`
 - Inbound fragment reassembly and outbound packet fragmentation for oversized BLE payloads
+- Official private-message TLV framing and Noise payload helpers for future DM transport
 - Offline protocol self-tests
 
 Not implemented in this first cut:
 
 - Noise private messaging
+- Noise private-message transport and CLI commands
 - Multi-hop relay participation
 - BLE peripheral advertising
 - File transfer
