@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -10,11 +11,12 @@ from bleak import BleakClient, BleakScanner
 
 from .constants import CHARACTERISTIC_UUID, MAX_PACKET_SIZE, SERVICE_UUID, MessageType
 from .crypto import Identity, peer_id_from_noise_public_key
+from .dedupe import ExpiringSet, packet_cache_key
 from .protocol import Announcement, Packet, make_announce_packet, make_leave_packet, make_public_message_packet
 
 
 SystemLogger = Callable[[str], None]
-MessageLogger = Callable[[str, str, datetime, str | None], None]
+MessageLogger = Callable[[str, str, datetime, str | None, str | None], None]
 
 
 @dataclass(slots=True)
@@ -36,23 +38,36 @@ class BLEChatTransport:
         system_log: SystemLogger,
         message_log: MessageLogger,
         scan_interval: float = 5.0,
+        background_mode: bool = False,
     ) -> None:
         self.identity = identity
         self.nickname = nickname
         self.system_log = system_log
         self.message_log = message_log
         self.scan_interval = scan_interval
+        self.background_mode = background_mode
         self.clients: dict[str, BleakClient] = {}
         self.connecting: set[str] = set()
         self.known_peers: dict[str, PeerRecord] = {}
         self._recent_own_signatures: deque[str] = deque(maxlen=128)
+        self._recent_inbound_messages = ExpiringSet(ttl_seconds=300.0, max_entries=1000)
+        self._reconnect_ready_at: dict[str, float] = {}
         self._scan_task: asyncio.Task[None] | None = None
+        self._scanner: BleakScanner | None = None
+        self._scanner_running = False
         self._stop_event = asyncio.Event()
 
     async def start(self) -> None:
         self._stop_event.clear()
+        self._scanner = BleakScanner(
+            detection_callback=self._handle_discovered_device,
+            service_uuids=[SERVICE_UUID],
+        )
         self._scan_task = asyncio.create_task(self._scan_loop())
-        self.system_log("Scanning for BitChat peers over Bluetooth LE.")
+        if self.background_mode:
+            self.system_log("Scanning for BitChat peers over Bluetooth LE in background duty-cycle mode.")
+        else:
+            self.system_log("Scanning for BitChat peers over Bluetooth LE.")
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -62,6 +77,7 @@ class BLEChatTransport:
                 await self._scan_task
             except asyncio.CancelledError:
                 pass
+        await self._set_scanning(False)
         try:
             await self._broadcast_packet(make_leave_packet(self.identity))
         except Exception:
@@ -87,26 +103,71 @@ class BLEChatTransport:
         await self._broadcast_packet(packet)
 
     async def _scan_loop(self) -> None:
-        while not self._stop_event.is_set():
+        try:
+            if not self.background_mode:
+                await self._set_scanning(True)
+                await self._stop_event.wait()
+                return
+
+            scan_on_duration = max(1.0, self.scan_interval)
+            scan_off_duration = max(scan_on_duration * 2.0, 10.0)
+            while not self._stop_event.is_set():
+                await self._set_scanning(True)
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=scan_on_duration)
+                    break
+                except asyncio.TimeoutError:
+                    pass
+
+                await self._set_scanning(False)
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=scan_off_duration)
+                    break
+                except asyncio.TimeoutError:
+                    pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.system_log(f"Scan loop failed: {exc}")
+
+    async def _set_scanning(self, enabled: bool) -> None:
+        if self._scanner is None:
+            return
+        if enabled:
+            if self._scanner_running:
+                return
             try:
-                devices = await BleakScanner.discover(timeout=self.scan_interval, service_uuids=[SERVICE_UUID])
-                for device in devices:
-                    address = getattr(device, "address", None)
-                    if not address or address in self.clients or address in self.connecting:
-                        continue
-                    self.connecting.add(address)
-                    asyncio.create_task(self._connect_device(device))
+                await self._scanner.start()
+                self._scanner_running = True
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self.system_log(f"Scan failed: {exc}")
-                await asyncio.sleep(2.0)
+                self.system_log(f"Failed to start BLE scan: {exc}")
+        else:
+            if not self._scanner_running:
+                return
+            try:
+                await self._scanner.stop()
+            except Exception:
+                pass
+            finally:
+                self._scanner_running = False
+
+    def _handle_discovered_device(self, device, _advertisement_data) -> None:
+        address = getattr(device, "address", None)
+        if not address or address in self.clients or address in self.connecting:
+            return
+        if not self._can_attempt_reconnect(address):
+            return
+        self.connecting.add(address)
+        asyncio.create_task(self._connect_device(device))
 
     async def _connect_device(self, device) -> None:
         address = device.address
         client = BleakClient(device, disconnected_callback=lambda _: self._on_disconnect(address))
         try:
             await client.connect()
+            self._reconnect_ready_at.pop(address, None)
             characteristic = client.services.get_characteristic(CHARACTERISTIC_UUID)
             if characteristic is None:
                 raise RuntimeError("peer missing BitChat characteristic")
@@ -118,6 +179,7 @@ class BLEChatTransport:
             self.system_log(f"Connected to BitChat peer at {address}.")
             await self._write_packet(client, make_announce_packet(self.identity, self.nickname))
         except Exception as exc:
+            self._record_reconnect_backoff(address, multiplier=1.0)
             self.system_log(f"Failed to connect to {address}: {exc}")
             try:
                 if client.is_connected:
@@ -128,6 +190,7 @@ class BLEChatTransport:
             self.connecting.discard(address)
 
     def _on_disconnect(self, address: str) -> None:
+        self._record_reconnect_backoff(address, multiplier=1.0 if self.background_mode else 0.4)
         if self.clients.pop(address, None) is not None:
             self.system_log(f"Disconnected from {address}.")
 
@@ -194,12 +257,15 @@ class BLEChatTransport:
         if not packet.verify_signature(peer.signing_public_key):
             self.system_log(f"Ignored message from {peer.nickname}: invalid signature.")
             return
+        message_id = packet_cache_key(packet)
+        if self._recent_inbound_messages.mark_seen(message_id):
+            return
         try:
             content = packet.payload.decode("utf-8")
         except UnicodeDecodeError:
             content = packet.payload.decode("utf-8", errors="replace")
         peer.last_seen = datetime.fromtimestamp(packet.timestamp_ms / 1000, tz=timezone.utc)
-        self.message_log(peer.nickname, content, peer.last_seen, peer.peer_id)
+        self.message_log(peer.nickname, content, peer.last_seen, peer.peer_id, message_id)
 
     def _handle_leave(self, packet: Packet) -> None:
         peer_id = packet.sender_id.hex()
@@ -221,3 +287,13 @@ class BLEChatTransport:
         if packet.signature is not None:
             self._recent_own_signatures.append(packet.signature.hex())
         await client.write_gatt_char(CHARACTERISTIC_UUID, data, response=False)
+
+    def _can_attempt_reconnect(self, address: str) -> bool:
+        return time.monotonic() >= self._reconnect_ready_at.get(address, 0.0)
+
+    def _record_reconnect_backoff(self, address: str, *, multiplier: float) -> None:
+        base_delay = max(self.scan_interval, 2.0)
+        delay = max(base_delay * multiplier, 2.0)
+        if self.background_mode:
+            delay = max(delay, 10.0)
+        self._reconnect_ready_at[address] = time.monotonic() + delay

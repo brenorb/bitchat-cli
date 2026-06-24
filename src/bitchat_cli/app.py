@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .constants import CHARACTERISTIC_UUID, SERVICE_UUID
-from .state import MessageStore, RuntimePaths, StateStore, pid_is_running
+from .state import ActiveSessionLease, MessageStore, RuntimePaths, StateStore, pid_is_running
 from .transport import BLEChatTransport
 
 
@@ -93,6 +93,7 @@ def _build_transport(
     scan_interval: float,
     system_log,
     message_log,
+    background_mode: bool,
 ) -> BLEChatTransport:
     return BLEChatTransport(
         identity=identity,
@@ -100,12 +101,21 @@ def _build_transport(
         system_log=system_log,
         message_log=message_log,
         scan_interval=scan_interval,
+        background_mode=background_mode,
     )
 
 
 async def run_chat(args: argparse.Namespace) -> int:
-    store = StateStore()
-    message_store = MessageStore()
+    runtime = RuntimePaths()
+    runtime.ensure()
+    session = ActiveSessionLease(runtime.radio_pid_path)
+    acquired, owner_pid = session.acquire()
+    if not acquired:
+        print(f"another bitchat BLE session is already running (pid {owner_pid})")
+        return 1
+
+    store = StateStore(runtime.state_path)
+    message_store = MessageStore(runtime.inbox_path)
     state = store.load()
     if args.nickname:
         state.nickname = args.nickname
@@ -114,7 +124,13 @@ async def run_chat(args: argparse.Namespace) -> int:
     def system_log(message: str) -> None:
         print(f"[system] {message}", flush=True)
 
-    def message_log(sender: str, content: str, timestamp: datetime, peer_id: str | None) -> None:
+    def message_log(
+        sender: str,
+        content: str,
+        timestamp: datetime,
+        peer_id: str | None,
+        message_id: str | None,
+    ) -> None:
         ts = timestamp.astimezone(timezone.utc).strftime("%H:%M:%S")
         message_store.append(
             direction="inbound",
@@ -122,22 +138,24 @@ async def run_chat(args: argparse.Namespace) -> int:
             content=content,
             timestamp=timestamp,
             peer_id=peer_id,
+            message_id=message_id,
         )
         print(f"\n[{ts}] <{sender}> {content}", flush=True)
 
-    transport = _build_transport(
-        identity=state.identity,
-        nickname=state.nickname,
-        system_log=system_log,
-        message_log=message_log,
-        scan_interval=args.scan_interval,
-    )
-    await transport.start()
-    reader, stdin_transport = await _open_stdin_reader()
-
-    print(f"welcome to bitchat-cli; nickname={state.nickname} peer_id={state.identity.peer_id}")
-    print("type /help for commands")
     try:
+        transport = _build_transport(
+            identity=state.identity,
+            nickname=state.nickname,
+            system_log=system_log,
+            message_log=message_log,
+            scan_interval=args.scan_interval,
+            background_mode=False,
+        )
+        await transport.start()
+        reader, stdin_transport = await _open_stdin_reader()
+
+        print(f"welcome to bitchat-cli; nickname={state.nickname} peer_id={state.identity.peer_id}")
+        print("type /help for commands")
         while True:
             print("> ", end="", flush=True)
             line = await reader.readline()
@@ -198,8 +216,11 @@ async def run_chat(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        stdin_transport.close()
-        await transport.stop()
+        if "stdin_transport" in locals():
+            stdin_transport.close()
+        if "transport" in locals():
+            await transport.stop()
+        session.release()
     return 0
 
 
@@ -250,6 +271,12 @@ def run_selftest(_args: argparse.Namespace) -> int:
 async def run_daemon_foreground(args: argparse.Namespace) -> int:
     runtime = RuntimePaths()
     runtime.ensure()
+    session = ActiveSessionLease(runtime.radio_pid_path)
+    acquired, owner_pid = session.acquire()
+    if not acquired:
+        print(f"another bitchat BLE session is already running (pid {owner_pid})")
+        return 1
+
     store = StateStore(runtime.state_path)
     message_store = MessageStore(runtime.inbox_path)
     state = store.load()
@@ -258,51 +285,62 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
         store.save(state)
 
     log_handle = runtime.daemon_log_path.open("a", encoding="utf-8")
-
-    def daemon_log(message: str) -> None:
-        line = f"{datetime.now(timezone.utc).isoformat()} [system] {message}"
-        print(line, file=log_handle, flush=True)
-
-    def daemon_message_log(sender: str, content: str, timestamp: datetime, peer_id: str | None) -> None:
-        message_store.append(
-            direction="inbound",
-            sender=sender,
-            content=content,
-            timestamp=timestamp,
-            peer_id=peer_id,
-        )
-        line = f"{timestamp.astimezone(timezone.utc).isoformat()} <{sender}> {content}"
-        print(line, file=log_handle, flush=True)
-
-    runtime.daemon_pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
-    transport = _build_transport(
-        identity=state.identity,
-        nickname=state.nickname,
-        system_log=daemon_log,
-        message_log=daemon_message_log,
-        scan_interval=args.scan_interval,
-    )
-
-    stop_event = asyncio.Event()
-
-    def _request_stop(_signum, _frame) -> None:
-        stop_event.set()
-
-    old_sigint = signal.signal(signal.SIGINT, _request_stop)
-    old_sigterm = signal.signal(signal.SIGTERM, _request_stop)
     try:
+        def daemon_log(message: str) -> None:
+            line = f"{datetime.now(timezone.utc).isoformat()} [system] {message}"
+            print(line, file=log_handle, flush=True)
+
+        def daemon_message_log(
+            sender: str,
+            content: str,
+            timestamp: datetime,
+            peer_id: str | None,
+            message_id: str | None,
+        ) -> None:
+            message_store.append(
+                direction="inbound",
+                sender=sender,
+                content=content,
+                timestamp=timestamp,
+                peer_id=peer_id,
+                message_id=message_id,
+            )
+            line = f"{timestamp.astimezone(timezone.utc).isoformat()} <{sender}> {content}"
+            print(line, file=log_handle, flush=True)
+
+        runtime.daemon_pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+        transport = _build_transport(
+            identity=state.identity,
+            nickname=state.nickname,
+            system_log=daemon_log,
+            message_log=daemon_message_log,
+            scan_interval=args.scan_interval,
+            background_mode=True,
+        )
+
+        stop_event = asyncio.Event()
+
+        def _request_stop(_signum, _frame) -> None:
+            stop_event.set()
+
+        old_sigint = signal.signal(signal.SIGINT, _request_stop)
+        old_sigterm = signal.signal(signal.SIGTERM, _request_stop)
         daemon_log(f"Daemon starting with nickname={state.nickname} peer_id={state.identity.peer_id}.")
         await transport.start()
         await stop_event.wait()
         daemon_log("Daemon stopping.")
     finally:
-        signal.signal(signal.SIGINT, old_sigint)
-        signal.signal(signal.SIGTERM, old_sigterm)
-        await transport.stop()
+        if "old_sigint" in locals():
+            signal.signal(signal.SIGINT, old_sigint)
+        if "old_sigterm" in locals():
+            signal.signal(signal.SIGTERM, old_sigterm)
+        if "transport" in locals():
+            await transport.stop()
         try:
             if runtime.daemon_pid_path.exists():
                 runtime.daemon_pid_path.unlink()
         finally:
+            session.release()
             log_handle.close()
     return 0
 
@@ -310,6 +348,11 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
 def run_daemon_start(args: argparse.Namespace) -> int:
     runtime = RuntimePaths()
     runtime.ensure()
+    session = ActiveSessionLease(runtime.radio_pid_path)
+    owner_pid = session.read_owner_pid()
+    if owner_pid is not None and pid_is_running(owner_pid):
+        print(f"another bitchat BLE session is already running (pid {owner_pid})")
+        return 1
     if runtime.daemon_pid_path.exists():
         try:
             existing_pid = int(runtime.daemon_pid_path.read_text().strip())
@@ -392,7 +435,7 @@ def run_daemon_status(_args: argparse.Namespace) -> int:
 
 def run_inbox(args: argparse.Namespace) -> int:
     runtime = RuntimePaths()
-    records = MessageStore(runtime.inbox_path).read_all()
+    records = MessageStore(runtime.inbox_path).read_all(deduplicate=True)
     records = [row for row in records if row.get("direction") == "inbound"]
     if args.tail is not None:
         records = records[-args.tail :]

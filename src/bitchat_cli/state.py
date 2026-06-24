@@ -78,8 +78,53 @@ class RuntimePaths:
     def inbox_path(self) -> Path:
         return self.root / "messages.jsonl"
 
+    @property
+    def radio_pid_path(self) -> Path:
+        return self.root / "radio.pid"
+
     def ensure(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
+
+
+def pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+class ActiveSessionLease:
+    def __init__(self, path: Path, *, is_running=pid_is_running) -> None:
+        self.path = path
+        self.is_running = is_running
+
+    def acquire(self, *, pid: int | None = None) -> tuple[bool, int | None]:
+        owner_pid = self.read_owner_pid()
+        current_pid = pid or os.getpid()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if owner_pid is not None and owner_pid != current_pid and self.is_running(owner_pid):
+            return False, owner_pid
+        self.path.write_text(f"{current_pid}\n", encoding="utf-8")
+        return True, None
+
+    def release(self, *, pid: int | None = None) -> None:
+        owner_pid = self.read_owner_pid()
+        current_pid = pid or os.getpid()
+        if owner_pid is None or owner_pid != current_pid:
+            return
+        self.path.unlink(missing_ok=True)
+
+    def read_owner_pid(self) -> int | None:
+        if not self.path.exists():
+            return None
+        try:
+            return int(self.path.read_text(encoding="utf-8").strip())
+        except ValueError:
+            self.path.unlink(missing_ok=True)
+            return None
 
 
 class MessageStore:
@@ -94,6 +139,7 @@ class MessageStore:
         content: str,
         timestamp: datetime,
         peer_id: str | None = None,
+        message_id: str | None = None,
     ) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         record = {
@@ -103,11 +149,12 @@ class MessageStore:
             "sender": sender,
             "peer_id": peer_id,
             "content": content,
+            "message_id": message_id,
         }
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=True) + "\n")
 
-    def read_all(self) -> list[dict[str, Any]]:
+    def read_all(self, *, deduplicate: bool = False) -> list[dict[str, Any]]:
         if not self.path.exists():
             return []
         rows: list[dict[str, Any]] = []
@@ -116,14 +163,25 @@ class MessageStore:
             if not line:
                 continue
             rows.append(json.loads(line))
+        if deduplicate:
+            rows = self._deduplicate(rows)
         return rows
 
-
-def pid_is_running(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    def _deduplicate(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        seen: set[str] = set()
+        deduplicated: list[dict[str, Any]] = []
+        for row in rows:
+            key = row.get("message_id") or "|".join(
+                [
+                    str(row.get("direction")),
+                    str(row.get("peer_id")),
+                    str(row.get("sender")),
+                    str(row.get("timestamp")),
+                    str(row.get("content")),
+                ]
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduplicated.append(row)
+        return deduplicated

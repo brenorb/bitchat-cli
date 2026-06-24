@@ -55,6 +55,15 @@ Daemon artifacts live under `~/.config/bitchat-cli/`:
 - `daemon.log` - background listener log
 - `messages.jsonl` - recorded message history
 - `daemon.pid` - running daemon pid
+- `radio.pid` - active BLE session guard
+
+Behavior notes:
+
+- The daemon now follows the macOS app's basic scanning shape: duty-cycled
+  background scanning instead of a tight `discover()` loop.
+- `inbox` deduplicates repeated deliveries of the same signed BitChat packet.
+- Only one CLI BLE session can own the radio at a time, so `chat` and `daemon`
+  no longer run concurrently.
 
 ## Notes
 
