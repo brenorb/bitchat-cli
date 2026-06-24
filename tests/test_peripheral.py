@@ -47,3 +47,24 @@ def test_create_peripheral_manager_passes_dispatch_queue() -> None:
         "queue": queue,
         "options": None,
     }
+
+
+def test_null_peripheral_endpoint_has_no_subscriber_addresses() -> None:
+    endpoint = peripheral_module.NullPeripheralEndpoint()
+
+    assert endpoint.subscriber_addresses() == ()
+
+
+def test_macos_peripheral_endpoint_reports_sorted_subscriber_addresses() -> None:
+    endpoint = peripheral_module.MacOSPeripheralEndpoint.__new__(peripheral_module.MacOSPeripheralEndpoint)
+    endpoint._subscribed_centrals = {
+        "peripheral:C1": object(),
+        "peripheral:A2": object(),
+        "peripheral:B7": object(),
+    }
+
+    assert endpoint.subscriber_addresses() == (
+        "peripheral:A2",
+        "peripheral:B7",
+        "peripheral:C1",
+    )

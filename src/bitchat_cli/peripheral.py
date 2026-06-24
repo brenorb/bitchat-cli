@@ -21,6 +21,8 @@ class PeripheralEndpoint(Protocol):
 
     def subscriber_count(self) -> int: ...
 
+    def subscriber_addresses(self) -> tuple[str, ...]: ...
+
     def is_advertising(self) -> bool: ...
 
     def send(
@@ -41,6 +43,9 @@ class NullPeripheralEndpoint:
 
     def subscriber_count(self) -> int:
         return 0
+
+    def subscriber_addresses(self) -> tuple[str, ...]:
+        return ()
 
     def is_advertising(self) -> bool:
         return False
@@ -226,6 +231,9 @@ class MacOSPeripheralEndpoint:
 
     def subscriber_count(self) -> int:
         return len(self._subscribed_centrals)
+
+    def subscriber_addresses(self) -> tuple[str, ...]:
+        return tuple(sorted(self._subscribed_centrals))
 
     def is_advertising(self) -> bool:
         return self._is_advertising

@@ -683,6 +683,7 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                             "known_peers": len(transport.known_peers),
                             "peripheral_advertising": transport.peripheral_endpoint.is_advertising(),
                             "peripheral_subscribers": transport.peripheral_endpoint.subscriber_count(),
+                            "peripheral_addresses": list(transport.peripheral_endpoint.subscriber_addresses()),
                         },
                     }
                 else:
@@ -905,6 +906,10 @@ def run_daemon_status(_args: argparse.Namespace) -> int:
             print(f"known_peers:     {runtime_status.get('known_peers')}")
             print(f"peripheral_adv:  {runtime_status.get('peripheral_advertising')}")
             print(f"peripheral_subs: {runtime_status.get('peripheral_subscribers')}")
+            addresses = runtime_status.get("peripheral_addresses")
+            if isinstance(addresses, list):
+                visible_addresses = ", ".join(str(item) for item in addresses if str(item))
+                print(f"peripheral_addrs: {visible_addresses or '-'}")
         return 0
     print(f"daemon pid file exists but process {pid} is not running")
     return 1

@@ -328,6 +328,7 @@ def test_run_daemon_status_includes_live_runtime_fields(tmp_path: Path, monkeypa
                 "known_peers": 2,
                 "peripheral_advertising": True,
                 "peripheral_subscribers": 3,
+                "peripheral_addresses": ["peripheral:B2", "peripheral:C1"],
             },
         }
 
@@ -344,6 +345,22 @@ def test_run_daemon_status_includes_live_runtime_fields(tmp_path: Path, monkeypa
     assert "known_peers:     2" in captured.out
     assert "peripheral_adv:  True" in captured.out
     assert "peripheral_subs: 3" in captured.out
+    assert "peripheral_addrs: peripheral:B2, peripheral:C1" in captured.out
+
+
+def test_run_daemon_status_reports_stale_pid_file(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    runtime.root.mkdir(parents=True, exist_ok=True)
+    runtime.daemon_pid_path.write_text("43210\n", encoding="utf-8")
+
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+    monkeypatch.setattr(app, "pid_is_running", lambda _pid: False)
+
+    exit_code = app.run_daemon_status(argparse.Namespace())
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "process 43210 is not running" in captured.out
 
 
 def test_run_daemon_stop_waits_for_exit_and_cleans_runtime_files(tmp_path: Path, monkeypatch, capsys) -> None:
