@@ -928,6 +928,9 @@ def _format_peripheral_event(event: dict[str, object]) -> str:
     byte_count = event.get("bytes")
     if isinstance(byte_count, int):
         parts.append(f"bytes={byte_count}")
+    total_bytes = event.get("total_bytes")
+    if isinstance(total_bytes, int):
+        parts.append(f"total_bytes={total_bytes}")
     return " ".join(parts)
 
 

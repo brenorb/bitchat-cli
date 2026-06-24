@@ -130,20 +130,34 @@ def test_pending_write_buffer_reassembles_offset_chunks_until_packet_decodes() -
     second = encoded[15:]
     endpoint = peripheral_module.MacOSPeripheralEndpoint.__new__(peripheral_module.MacOSPeripheralEndpoint)
     endpoint._pending_write_buffers = {}
+    endpoint._recent_events = peripheral_module.deque(maxlen=8)
 
     assert endpoint._append_pending_write_chunks("peripheral:A1", [(0, first)]) is None
     assert endpoint._pending_write_buffers["peripheral:A1"] == first
+    assert endpoint.recent_events()[-1] == {
+        "event": "write_buffered",
+        "address": "peripheral:A1",
+        "bytes": 15,
+        "total_bytes": 15,
+    }
 
     reassembled = endpoint._append_pending_write_chunks("peripheral:A1", [(15, second)])
 
     assert reassembled == encoded
     assert "peripheral:A1" not in endpoint._pending_write_buffers
+    assert endpoint.recent_events()[-1] == {
+        "event": "write_decoded",
+        "address": "peripheral:A1",
+        "bytes": len(second),
+        "total_bytes": len(encoded),
+    }
 
 
 def test_pending_write_buffer_drops_oversized_accumulation() -> None:
     endpoint = peripheral_module.MacOSPeripheralEndpoint.__new__(peripheral_module.MacOSPeripheralEndpoint)
     endpoint._pending_write_buffers = {}
     endpoint._system_log = lambda _message: None
+    endpoint._recent_events = peripheral_module.deque(maxlen=8)
 
     reassembled = endpoint._append_pending_write_chunks(
         "peripheral:A1",
@@ -152,3 +166,9 @@ def test_pending_write_buffer_drops_oversized_accumulation() -> None:
 
     assert reassembled is None
     assert "peripheral:A1" not in endpoint._pending_write_buffers
+    assert endpoint.recent_events()[-1] == {
+        "event": "write_oversized",
+        "address": "peripheral:A1",
+        "bytes": peripheral_module._PENDING_WRITE_CAP_BYTES + 1,
+        "total_bytes": peripheral_module._PENDING_WRITE_CAP_BYTES + 1,
+    }

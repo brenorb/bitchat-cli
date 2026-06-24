@@ -331,7 +331,7 @@ def test_run_daemon_status_includes_live_runtime_fields(tmp_path: Path, monkeypa
                 "peripheral_addresses": ["peripheral:B2", "peripheral:C1"],
                 "peripheral_recent_events": [
                     {"event": "subscribe", "address": "peripheral:B2"},
-                    {"event": "write", "address": "peripheral:B2", "bytes": 87},
+                    {"event": "write_decoded", "address": "peripheral:B2", "bytes": 23, "total_bytes": 87},
                 ],
             },
         }
@@ -351,7 +351,7 @@ def test_run_daemon_status_includes_live_runtime_fields(tmp_path: Path, monkeypa
     assert "peripheral_subs: 3" in captured.out
     assert "peripheral_addrs: peripheral:B2, peripheral:C1" in captured.out
     assert "peripheral_recent: subscribe peripheral:B2" in captured.out
-    assert "peripheral_recent: write peripheral:B2 bytes=87" in captured.out
+    assert "peripheral_recent: write_decoded peripheral:B2 bytes=23 total_bytes=87" in captured.out
 
 
 def test_run_daemon_status_reports_stale_pid_file(tmp_path: Path, monkeypatch, capsys) -> None:

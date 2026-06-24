@@ -284,9 +284,11 @@ class MacOSPeripheralEndpoint:
         chunks: list[tuple[int, bytes]],
     ) -> bytes | None:
         combined = bytearray(self._pending_write_buffers.get(address, b""))
+        appended_bytes = 0
         for offset, data in chunks:
             if not data:
                 continue
+            appended_bytes += len(data)
             end = offset + len(data)
             if len(combined) < end:
                 combined.extend(b"\x00" * (end - len(combined)))
@@ -294,6 +296,12 @@ class MacOSPeripheralEndpoint:
         encoded = bytes(combined)
         if len(encoded) > _PENDING_WRITE_CAP_BYTES:
             self._pending_write_buffers.pop(address, None)
+            self._record_recent_event(
+                "write_oversized",
+                address,
+                bytes=appended_bytes,
+                total_bytes=len(encoded),
+            )
             self._system_log(
                 f"Dropped oversized pending peripheral write buffer from {address}: {len(encoded)} bytes."
             )
@@ -302,8 +310,20 @@ class MacOSPeripheralEndpoint:
             Packet.decode(encoded)
         except ValueError:
             self._pending_write_buffers[address] = encoded
+            self._record_recent_event(
+                "write_buffered",
+                address,
+                bytes=appended_bytes,
+                total_bytes=len(encoded),
+            )
             return None
         self._pending_write_buffers.pop(address, None)
+        self._record_recent_event(
+            "write_decoded",
+            address,
+            bytes=appended_bytes,
+            total_bytes=len(encoded),
+        )
         return encoded
 
     def send(
@@ -463,7 +483,6 @@ class MacOSPeripheralEndpoint:
             value = _objc_attr(request, "value")
             data = bytes(value) if value is not None else b""
             address = _central_address(central)
-            self._record_recent_event("write", address, bytes=len(data))
             manager.respondToRequest_withResult_(request, self._CoreBluetooth.CBATTErrorSuccess)
             grouped.setdefault(address, []).append((central, offset, data))
         for address, entries in grouped.items():
