@@ -242,6 +242,7 @@ async def run_chat(args: argparse.Namespace) -> int:
 
 def run_selftest(_args: argparse.Namespace) -> int:
     from .crypto import Identity, peer_id_from_noise_public_key
+    from .noise import XXHandshake
     from .protocol import (
         Announcement,
         NoisePayload,
@@ -302,6 +303,19 @@ def run_selftest(_args: argparse.Namespace) -> int:
     assert decoded_private_payload == private_payload
     assert NoisePayload.decode(make_delivered_payload("m-1")).payload_type == NoisePayloadType.DELIVERED
     assert NoisePayload.decode(make_read_receipt_payload("m-1")).payload_type == NoisePayloadType.READ_RECEIPT
+
+    initiator = XXHandshake(role="initiator", local_static_private_key=identity.noise_private_key)
+    responder_identity = Identity.generate()
+    responder = XXHandshake(role="responder", local_static_private_key=responder_identity.noise_private_key)
+    responder.read_message(initiator.write_message())
+    initiator.read_message(responder.write_message())
+    responder.read_message(initiator.write_message())
+    initiator_send, initiator_receive = initiator.transport_ciphers(use_extracted_nonce=True)
+    responder_send, responder_receive = responder.transport_ciphers(use_extracted_nonce=True)
+    encrypted_ping = initiator_send.encrypt(b"ping")
+    encrypted_pong = responder_send.encrypt(b"pong")
+    assert responder_receive.decrypt(encrypted_ping) == b"ping"
+    assert initiator_receive.decrypt(encrypted_pong) == b"pong"
 
     print("selftest ok")
     return 0

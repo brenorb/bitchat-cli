@@ -11,6 +11,7 @@ Current scope:
 - Central-role BLE transport using `bleak`
 - Inbound fragment reassembly and outbound packet fragmentation for oversized BLE payloads
 - Official private-message TLV framing and Noise payload helpers for future DM transport
+- Official Noise XX session primitives validated against the macOS app's test vectors
 - Offline protocol self-tests
 
 Not implemented in this first cut:
