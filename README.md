@@ -6,6 +6,7 @@ Current scope:
 
 - Real BitChat mainnet BLE UUIDs
 - Official announce packet format
+- Announce packets include current direct-neighbor hints from live connected peers
 - Official packet signing and peer ID derivation
 - Public broadcast chat with persistent local identity
 - Central-role BLE transport using `bleak`

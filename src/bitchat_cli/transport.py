@@ -200,7 +200,7 @@ class BLEChatTransport:
 
     async def set_nickname(self, nickname: str) -> None:
         self.nickname = nickname
-        await self._broadcast_packet(make_announce_packet(self.identity, nickname))
+        await self._broadcast_packet(self._make_announce_packet(nickname=nickname))
 
     async def send_public_message(self, content: str) -> None:
         packet = make_public_message_packet(self.identity, content)
@@ -309,7 +309,7 @@ class BLEChatTransport:
             )
             self.clients[address] = client
             self.system_log(f"Connected to BitChat peer at {address}.")
-            await self._write_packet(client, make_announce_packet(self.identity, self.nickname))
+            await self._write_packet(client, self._make_announce_packet())
         except Exception as exc:
             self._record_reconnect_backoff(address, multiplier=1.0)
             self.system_log(f"Failed to connect to {address}: {exc}")
@@ -492,6 +492,18 @@ class BLEChatTransport:
                     f"age {int(packet_age_seconds)}s exceeds {int(_MAX_BROADCAST_PACKET_AGE_SECONDS)}s."
                 )
         return None
+
+    def _make_announce_packet(self, *, nickname: str | None = None) -> Packet:
+        direct_neighbors = [
+            bytes.fromhex(peer.peer_id)
+            for peer in sorted(self.known_peers.values(), key=lambda item: item.peer_id)[:10]
+            if peer.active_address is not None and peer.active_address in self.clients
+        ]
+        return make_announce_packet(
+            self.identity,
+            nickname or self.nickname,
+            direct_neighbors=direct_neighbors,
+        )
 
     async def _handle_announce(self, address: str, packet: Packet) -> None:
         try:

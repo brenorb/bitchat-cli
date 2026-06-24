@@ -64,12 +64,18 @@ def test_signature_survives_ttl_relay_mutation() -> None:
 
 def test_announce_packet_signature_and_peer_binding() -> None:
     identity = Identity.generate()
-    packet = make_announce_packet(identity, "alice", timestamp_ms=1_700_000_000_000)
+    packet = make_announce_packet(
+        identity,
+        "alice",
+        direct_neighbors=[bytes.fromhex("0011223344556677")],
+        timestamp_ms=1_700_000_000_000,
+    )
     decoded = Packet.decode(packet.encode(padding=False))
     announcement = Announcement.decode(decoded.payload)
 
     assert decoded.verify_signature(announcement.signing_public_key)
     assert peer_id_from_noise_public_key(announcement.noise_public_key) == identity.peer_id
+    assert announcement.direct_neighbors == [bytes.fromhex("0011223344556677")]
 
 
 def test_private_message_packet_round_trip() -> None:

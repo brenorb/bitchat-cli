@@ -346,11 +346,18 @@ def make_public_message_packet(identity: Identity, content: str, *, timestamp_ms
     return packet.sign(identity)
 
 
-def make_announce_packet(identity: Identity, nickname: str, *, timestamp_ms: int | None = None) -> Packet:
+def make_announce_packet(
+    identity: Identity,
+    nickname: str,
+    *,
+    direct_neighbors: list[bytes] | None = None,
+    timestamp_ms: int | None = None,
+) -> Packet:
     announcement = Announcement(
         nickname=nickname,
         noise_public_key=identity.noise_public_key,
         signing_public_key=identity.signing_public_key,
+        direct_neighbors=direct_neighbors or [],
     )
     packet = Packet(
         packet_type=MessageType.ANNOUNCE,

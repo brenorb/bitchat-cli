@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 from bitchat_cli.constants import MessageType
 from bitchat_cli.crypto import Identity
-from bitchat_cli.protocol import Packet, make_noise_handshake_packet, make_public_message_packet
+from bitchat_cli.protocol import Announcement, Packet, make_noise_handshake_packet, make_public_message_packet
 from bitchat_cli.transport import BLEChatTransport, PeerRecord
 from bitchat_cli.fragments import fragment_packet_sequence
 
@@ -746,3 +746,27 @@ def test_connect_enqueue_drops_when_queue_is_full() -> None:
 
     assert queued.address == "A1"
     assert any("Dropped connect candidate" in message for message in logs)
+
+
+def test_announce_packet_includes_connected_direct_neighbors() -> None:
+    transport = _make_transport(
+        identity=Identity.generate(),
+        nickname="local",
+        private_messages=[],
+        receipts=[],
+    )
+    alice = Identity.generate()
+    bob = Identity.generate()
+    _register_known_peer(transport, peer_identity=alice, nickname="alice", address="A1")
+    _register_known_peer(transport, peer_identity=bob, nickname="bob", address="B1")
+    transport.clients = {"A1": "A1", "B1": "B1"}  # type: ignore[assignment]
+    transport.known_peers[alice.peer_id].active_address = "A1"
+    transport.known_peers[bob.peer_id].active_address = "B1"
+
+    packet = transport._make_announce_packet()
+    announcement = Announcement.decode(packet.payload)
+
+    assert set(announcement.direct_neighbors) == {
+        bytes.fromhex(alice.peer_id),
+        bytes.fromhex(bob.peer_id),
+    }
