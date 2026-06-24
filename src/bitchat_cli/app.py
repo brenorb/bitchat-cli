@@ -17,6 +17,8 @@ from .peripheral import create_peripheral_endpoint, peripheral_supported
 from .state import ActiveSessionLease, MessageStore, PeerStore, RuntimePaths, StateStore, pid_is_running
 from .transport import BLEChatTransport
 
+_PERIPHERAL_SUBSCRIBE_ANNOUNCE_DELAY_SECONDS = 0.4
+
 
 def _clear_screen() -> None:
     print("\033[2J\033[H", end="", flush=True)
@@ -206,9 +208,30 @@ def _build_transport(
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
+    pending_subscribe_announces: dict[str, object] = {}
+
+    def flush_subscribe_announce(address: str) -> None:
+        pending_subscribe_announces.pop(address, None)
+        asyncio.create_task(transport._handle_peripheral_subscribe(address))
 
     def handle_subscribe(address: str) -> None:
-        asyncio.create_task(transport._handle_peripheral_subscribe(address))
+        existing = pending_subscribe_announces.pop(address, None)
+        if existing is not None:
+            existing.cancel()
+        if loop is None:
+            flush_subscribe_announce(address)
+            return
+        pending_subscribe_announces[address] = loop.call_later(
+            _PERIPHERAL_SUBSCRIBE_ANNOUNCE_DELAY_SECONDS,
+            flush_subscribe_announce,
+            address,
+        )
+
+    def handle_unsubscribe(address: str) -> None:
+        existing = pending_subscribe_announces.pop(address, None)
+        if existing is not None:
+            existing.cancel()
+        transport._handle_peripheral_unsubscribe(address)
 
     transport.peripheral_endpoint = create_peripheral_endpoint(
         service_uuid=SERVICE_UUID,
@@ -216,7 +239,7 @@ def _build_transport(
         system_log=system_log,
         on_write=transport._enqueue_notification,
         on_subscribe=handle_subscribe,
-        on_unsubscribe=transport._handle_peripheral_unsubscribe,
+        on_unsubscribe=handle_unsubscribe,
         loop=loop,
     )
     return transport

@@ -66,6 +66,119 @@ def test_build_transport_attaches_platform_peripheral_endpoint(monkeypatch) -> N
     assert endpoint.sent != []
 
 
+def test_build_transport_delays_peripheral_subscribe_announce(monkeypatch) -> None:
+    endpoint = FakePeripheralEndpoint()
+    callbacks: dict[str, object] = {}
+    created_tasks: list[object] = []
+
+    class FakeHandle:
+        def __init__(self, delay: float, callback, args: tuple[object, ...]) -> None:
+            self.delay = delay
+            self.callback = callback
+            self.args = args
+            self.cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    class FakeLoop:
+        def __init__(self) -> None:
+            self.handles: list[FakeHandle] = []
+
+        def call_later(self, delay: float, callback, *args):
+            handle = FakeHandle(delay, callback, args)
+            self.handles.append(handle)
+            return handle
+
+    fake_loop = FakeLoop()
+
+    def fake_create_task(coro):
+        created_tasks.append(coro)
+        return coro
+
+    def fake_create_peripheral_endpoint(**kwargs):
+        callbacks["subscribe"] = kwargs["on_subscribe"]
+        callbacks["unsubscribe"] = kwargs["on_unsubscribe"]
+        return endpoint
+
+    monkeypatch.setattr(app, "create_peripheral_endpoint", fake_create_peripheral_endpoint)
+    monkeypatch.setattr(app.asyncio, "get_running_loop", lambda: fake_loop)
+    monkeypatch.setattr(app.asyncio, "create_task", fake_create_task)
+
+    transport = app._build_transport(
+        nickname="local",
+        identity=Identity.generate(),
+        scan_interval=5.0,
+        system_log=lambda _message: None,
+        message_log=lambda *_args: None,
+        peer_log=None,
+        private_message_log=None,
+        receipt_log=None,
+        background_mode=False,
+    )
+
+    callbacks["subscribe"]("peripheral:A1")
+
+    assert created_tasks == []
+    assert len(fake_loop.handles) == 1
+    assert fake_loop.handles[0].delay == app._PERIPHERAL_SUBSCRIBE_ANNOUNCE_DELAY_SECONDS
+
+    fake_loop.handles[0].callback(*fake_loop.handles[0].args)
+
+    assert len(created_tasks) == 1
+    created_tasks[0].close()
+    assert transport.peripheral_endpoint is endpoint
+
+
+def test_build_transport_cancels_pending_subscribe_announce_on_unsubscribe(monkeypatch) -> None:
+    endpoint = FakePeripheralEndpoint()
+    callbacks: dict[str, object] = {}
+    unsubscribed: list[str] = []
+
+    class FakeHandle:
+        def __init__(self) -> None:
+            self.cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    class FakeLoop:
+        def __init__(self) -> None:
+            self.handle = FakeHandle()
+
+        def call_later(self, _delay: float, _callback, *_args):
+            return self.handle
+
+    fake_loop = FakeLoop()
+
+    def fake_create_peripheral_endpoint(**kwargs):
+        callbacks["subscribe"] = kwargs["on_subscribe"]
+        callbacks["unsubscribe"] = kwargs["on_unsubscribe"]
+        return endpoint
+
+    monkeypatch.setattr(app, "create_peripheral_endpoint", fake_create_peripheral_endpoint)
+    monkeypatch.setattr(app.asyncio, "get_running_loop", lambda: fake_loop)
+
+    transport = app._build_transport(
+        nickname="local",
+        identity=Identity.generate(),
+        scan_interval=5.0,
+        system_log=lambda _message: None,
+        message_log=lambda *_args: None,
+        peer_log=None,
+        private_message_log=None,
+        receipt_log=None,
+        background_mode=False,
+    )
+    transport._handle_peripheral_unsubscribe = lambda address: unsubscribed.append(address)  # type: ignore[method-assign]
+
+    callbacks["subscribe"]("peripheral:A1")
+    callbacks["unsubscribe"]("peripheral:A1")
+
+    assert fake_loop.handle.cancelled is True
+    assert unsubscribed == ["peripheral:A1"]
+
+
 def test_run_peers_lists_persisted_peers(tmp_path: Path, monkeypatch, capsys) -> None:
     runtime = RuntimePaths(tmp_path)
     identity = Identity.generate()
