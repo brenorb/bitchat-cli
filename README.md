@@ -93,6 +93,9 @@ Behavior notes:
 - The macOS peripheral endpoint now exposes the same BLE characteristic surface
   the official app does for inbound writes: notify, read, write, and
   write-without-response.
+- Inbound peripheral writes are now reassembled across offset-based CoreBluetooth
+  write requests before packet decode, which matches the official app's long
+  write behavior without growing an unbounded buffer.
 - `send` queues a public channel message through the running daemon, so you can
   test outbound delivery without stopping the background listener to open
   interactive `chat`.

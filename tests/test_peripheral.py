@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import bitchat_cli.peripheral as peripheral_module
+from bitchat_cli.crypto import Identity
+from bitchat_cli.protocol import make_public_message_packet
 
 
 def test_create_dispatch_queue_uses_bitchat_label(monkeypatch) -> None:
@@ -118,3 +120,35 @@ def test_macos_peripheral_endpoint_tracks_bounded_recent_events() -> None:
             "address": "peripheral:B2",
         },
     )
+
+
+def test_pending_write_buffer_reassembles_offset_chunks_until_packet_decodes() -> None:
+    identity = Identity.generate()
+    packet = make_public_message_packet(identity, "hello from split write")
+    encoded = packet.encode(padding=False)
+    first = encoded[:15]
+    second = encoded[15:]
+    endpoint = peripheral_module.MacOSPeripheralEndpoint.__new__(peripheral_module.MacOSPeripheralEndpoint)
+    endpoint._pending_write_buffers = {}
+
+    assert endpoint._append_pending_write_chunks("peripheral:A1", [(0, first)]) is None
+    assert endpoint._pending_write_buffers["peripheral:A1"] == first
+
+    reassembled = endpoint._append_pending_write_chunks("peripheral:A1", [(15, second)])
+
+    assert reassembled == encoded
+    assert "peripheral:A1" not in endpoint._pending_write_buffers
+
+
+def test_pending_write_buffer_drops_oversized_accumulation() -> None:
+    endpoint = peripheral_module.MacOSPeripheralEndpoint.__new__(peripheral_module.MacOSPeripheralEndpoint)
+    endpoint._pending_write_buffers = {}
+    endpoint._system_log = lambda _message: None
+
+    reassembled = endpoint._append_pending_write_chunks(
+        "peripheral:A1",
+        [(0, b"\x01" * (peripheral_module._PENDING_WRITE_CAP_BYTES + 1))],
+    )
+
+    assert reassembled is None
+    assert "peripheral:A1" not in endpoint._pending_write_buffers

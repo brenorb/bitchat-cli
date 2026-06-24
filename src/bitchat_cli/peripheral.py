@@ -7,6 +7,9 @@ from typing import Callable, Protocol
 
 import libdispatch
 
+from .constants import MAX_PACKET_SIZE
+from .protocol import Packet
+
 SystemLogger = Callable[[str], None]
 WriteHandler = Callable[[str, bytes], None]
 LifecycleHandler = Callable[[str], None]
@@ -190,6 +193,7 @@ def _characteristic_spec(core_bluetooth) -> tuple[int, int]:
 
 
 _RECENT_EVENT_LIMIT = 8
+_PENDING_WRITE_CAP_BYTES = MAX_PACKET_SIZE
 
 
 class MacOSPeripheralEndpoint:
@@ -221,6 +225,7 @@ class MacOSPeripheralEndpoint:
         self._is_advertising = False
         self._subscribed_centrals: dict[str, object] = {}
         self._pending_updates: deque[tuple[bytes, tuple[object, ...] | None]] = deque()
+        self._pending_write_buffers: dict[str, bytes] = {}
         self._recent_events: deque[dict[str, object]] = deque(maxlen=_RECENT_EVENT_LIMIT)
         self._characteristic = None
         self._service = None
@@ -237,6 +242,7 @@ class MacOSPeripheralEndpoint:
         self._started = False
         self._subscribed_centrals.clear()
         self._pending_updates.clear()
+        self._pending_write_buffers.clear()
         self._service_ready = False
         self._is_advertising = False
         try:
@@ -271,6 +277,34 @@ class MacOSPeripheralEndpoint:
         }
         item.update(details)
         self._recent_events.append(item)
+
+    def _append_pending_write_chunks(
+        self,
+        address: str,
+        chunks: list[tuple[int, bytes]],
+    ) -> bytes | None:
+        combined = bytearray(self._pending_write_buffers.get(address, b""))
+        for offset, data in chunks:
+            if not data:
+                continue
+            end = offset + len(data)
+            if len(combined) < end:
+                combined.extend(b"\x00" * (end - len(combined)))
+            combined[offset:end] = data
+        encoded = bytes(combined)
+        if len(encoded) > _PENDING_WRITE_CAP_BYTES:
+            self._pending_write_buffers.pop(address, None)
+            self._system_log(
+                f"Dropped oversized pending peripheral write buffer from {address}: {len(encoded)} bytes."
+            )
+            return None
+        try:
+            Packet.decode(encoded)
+        except ValueError:
+            self._pending_write_buffers[address] = encoded
+            return None
+        self._pending_write_buffers.pop(address, None)
+        return encoded
 
     def send(
         self,
@@ -378,6 +412,7 @@ class MacOSPeripheralEndpoint:
         if state != self._CoreBluetooth.CBManagerStatePoweredOn:
             self._service_ready = False
             self._is_advertising = False
+            self._pending_write_buffers.clear()
             return
         self._configure_if_ready()
 
@@ -398,10 +433,12 @@ class MacOSPeripheralEndpoint:
     def _handle_unsubscribe(self, central: object) -> None:
         address = _central_address(central)
         self._subscribed_centrals.pop(address, None)
+        self._pending_write_buffers.pop(address, None)
         self._record_recent_event("unsubscribe", address)
         self._loop.call_soon_threadsafe(self._on_unsubscribe, address)
 
     def _handle_write_requests(self, manager, requests) -> None:
+        grouped: dict[str, list[tuple[object, int, bytes]]] = {}
         for request in requests:
             central = _objc_attr(request, "central")
             characteristic = _objc_attr(request, "characteristic")
@@ -410,7 +447,6 @@ class MacOSPeripheralEndpoint:
                 central is None
                 or characteristic is None
                 or self._characteristic is None
-                or offset != 0
             ):
                 manager.respondToRequest_withResult_(
                     request,
@@ -428,5 +464,10 @@ class MacOSPeripheralEndpoint:
             data = bytes(value) if value is not None else b""
             address = _central_address(central)
             self._record_recent_event("write", address, bytes=len(data))
-            self._loop.call_soon_threadsafe(self._on_write, address, data)
             manager.respondToRequest_withResult_(request, self._CoreBluetooth.CBATTErrorSuccess)
+            grouped.setdefault(address, []).append((central, offset, data))
+        for address, entries in grouped.items():
+            chunks = [(offset, data) for _central, offset, data in sorted(entries, key=lambda item: item[1])]
+            combined = self._append_pending_write_chunks(address, chunks)
+            if combined is not None:
+                self._loop.call_soon_threadsafe(self._on_write, address, combined)
