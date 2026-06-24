@@ -430,23 +430,34 @@ class BLEChatTransport:
                 self._notification_queue.task_done()
 
     async def _handle_decoded_packet(self, address: str, packet: Packet) -> None:
+        ingress_peer = self._peer_for_address(address)
+        claimed_sender_id = packet.sender_id.hex()
         signature_hex = packet.signature.hex() if packet.signature else None
-        if packet.sender_id.hex() == self.identity.peer_id or (
-            signature_hex is not None and signature_hex in self._recent_own_signatures
-        ):
+        allow_self_authored_rsr = False
+        if packet.is_rsr:
+            validation_peer_id = ingress_peer.peer_id if ingress_peer is not None else claimed_sender_id
+            if not self._request_sync_manager.is_valid_response(validation_peer_id, is_rsr=True):
+                self.system_log(f"Ignored unsolicited sync response from {validation_peer_id}.")
+                return
+            allow_self_authored_rsr = (
+                packet.ttl == 0
+                and ingress_peer is not None
+                and claimed_sender_id == self.identity.peer_id
+            )
+        if (
+            claimed_sender_id == self.identity.peer_id
+            or (signature_hex is not None and signature_hex in self._recent_own_signatures)
+        ) and not allow_self_authored_rsr:
             return
 
-        if packet.is_rsr and not self._request_sync_manager.is_valid_response(
-            packet.sender_id.hex(),
-            is_rsr=True,
-        ):
-            self.system_log(f"Ignored unsolicited sync response from {packet.sender_id.hex()}.")
-            return
         if not packet.is_rsr:
             rejection_reason = self._ingress_time_rejection(packet)
             if rejection_reason is not None:
                 self.system_log(rejection_reason)
                 return
+        elif ingress_peer is None and claimed_sender_id != self.identity.peer_id:
+            self.system_log(f"Ignored sync response from unknown ingress address {address}.")
+            return
 
         packet_key = packet_cache_key(packet)
         if self._recent_seen_packets.mark_seen(packet_key):
@@ -563,7 +574,22 @@ class BLEChatTransport:
             direct_neighbors=direct_neighbors,
         )
 
+    def _peer_for_address(self, address: str) -> PeerRecord | None:
+        for peer in self.known_peers.values():
+            if peer.active_address == address:
+                return peer
+        for peer in self.known_peers.values():
+            if address in peer.addresses:
+                return peer
+        return None
+
     async def _handle_announce(self, address: str, packet: Packet) -> None:
+        if packet.sender_id.hex() == self.identity.peer_id and packet.is_rsr:
+            if not packet.verify_signature(self.identity.signing_public_key):
+                self.system_log(f"Ignored replayed self announce from {address}: invalid packet signature.")
+                return
+            self._remember_sync_packet(packet)
+            return
         try:
             announcement = Announcement.decode(packet.payload)
         except Exception:
@@ -606,10 +632,18 @@ class BLEChatTransport:
     async def _handle_message(self, packet: Packet) -> None:
         peer_id = packet.sender_id.hex()
         peer = self.known_peers.get(peer_id)
-        if peer is None:
-            return
-        if not packet.verify_signature(peer.signing_public_key):
-            self.system_log(f"Ignored message from {peer.nickname}: invalid signature.")
+        sender_nickname: str
+        sender_key: bytes
+        if peer_id == self.identity.peer_id:
+            sender_nickname = self.nickname
+            sender_key = self.identity.signing_public_key
+        else:
+            if peer is None:
+                return
+            sender_nickname = peer.nickname
+            sender_key = peer.signing_public_key
+        if not packet.verify_signature(sender_key):
+            self.system_log(f"Ignored message from {sender_nickname}: invalid signature.")
             return
         message_id = packet_cache_key(packet)
         if self._recent_inbound_messages.mark_seen(message_id):
@@ -618,9 +652,11 @@ class BLEChatTransport:
             content = packet.payload.decode("utf-8")
         except UnicodeDecodeError:
             content = packet.payload.decode("utf-8", errors="replace")
-        peer.last_seen = datetime.fromtimestamp(packet.timestamp_ms / 1000, tz=timezone.utc)
+        timestamp = datetime.fromtimestamp(packet.timestamp_ms / 1000, tz=timezone.utc)
+        if peer is not None:
+            peer.last_seen = timestamp
         self._remember_sync_packet(packet)
-        self.message_log(peer.nickname, content, peer.last_seen, peer.peer_id, message_id)
+        self.message_log(sender_nickname, content, timestamp, peer_id, message_id)
 
     async def _handle_request_sync(self, packet: Packet) -> None:
         if packet.recipient_id is not None and packet.recipient_id.hex() != self.identity.peer_id:

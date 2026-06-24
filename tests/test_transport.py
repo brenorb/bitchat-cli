@@ -1108,6 +1108,115 @@ def test_unsolicited_rsr_public_message_is_rejected() -> None:
     asyncio.run(case())
 
 
+def test_solicited_rsr_replay_is_validated_against_responding_peer() -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        alice_identity = Identity.generate()
+        bob_identity = Identity.generate()
+        received_messages: list[tuple[str, str]] = []
+        transport = BLEChatTransport(
+            identity=local_identity,
+            nickname="local",
+            system_log=lambda _message: None,
+            message_log=lambda sender, content, _timestamp, _peer_id, _message_id: received_messages.append(
+                (sender, content)
+            ),
+        )
+        _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="A1")
+        _register_known_peer(transport, peer_identity=bob_identity, nickname="bob", address="B1")
+        transport.clients = {"A1": "A1"}  # type: ignore[assignment]
+
+        async def fake_send(_peer_id: str, _packet: Packet) -> bool:
+            return True
+
+        transport._send_packet_to_peer = fake_send  # type: ignore[method-assign]
+        assert await transport.send_request_sync(alice_identity.peer_id) is True
+
+        packet = Packet(
+            packet_type=MessageType.MESSAGE,
+            sender_id=bytes.fromhex(bob_identity.peer_id),
+            payload=b"via alice cache",
+            timestamp_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+            ttl=0,
+            is_rsr=True,
+        ).sign(bob_identity)
+
+        await transport._handle_decoded_packet("A1", packet)
+
+        assert received_messages == [("bob", "via alice cache")]
+
+    asyncio.run(case())
+
+
+def test_solicited_self_authored_rsr_replay_is_accepted_from_responding_peer() -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        alice_identity = Identity.generate()
+        received_messages: list[tuple[str, str]] = []
+        transport = BLEChatTransport(
+            identity=local_identity,
+            nickname="local",
+            system_log=lambda _message: None,
+            message_log=lambda sender, content, _timestamp, _peer_id, _message_id: received_messages.append(
+                (sender, content)
+            ),
+        )
+        _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="A1")
+        transport.clients = {"A1": "A1"}  # type: ignore[assignment]
+
+        async def fake_send(_peer_id: str, _packet: Packet) -> bool:
+            return True
+
+        transport._send_packet_to_peer = fake_send  # type: ignore[method-assign]
+        assert await transport.send_request_sync(alice_identity.peer_id) is True
+
+        packet = Packet(
+            packet_type=MessageType.MESSAGE,
+            sender_id=bytes.fromhex(local_identity.peer_id),
+            payload=b"my cached line",
+            timestamp_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+            ttl=0,
+            is_rsr=True,
+        ).sign(local_identity)
+
+        await transport._handle_decoded_packet("A1", packet)
+
+        assert received_messages == [("local", "my cached line")]
+
+    asyncio.run(case())
+
+
+def test_unsolicited_self_authored_rsr_replay_is_rejected() -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        alice_identity = Identity.generate()
+        received_messages: list[tuple[str, str]] = []
+        transport = BLEChatTransport(
+            identity=local_identity,
+            nickname="local",
+            system_log=lambda _message: None,
+            message_log=lambda sender, content, _timestamp, _peer_id, _message_id: received_messages.append(
+                (sender, content)
+            ),
+        )
+        _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="A1")
+
+        packet = Packet(
+            packet_type=MessageType.MESSAGE,
+            sender_id=bytes.fromhex(local_identity.peer_id),
+            payload=b"my cached line",
+            timestamp_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+            ttl=0,
+            is_rsr=True,
+        ).sign(local_identity)
+
+        await transport._handle_decoded_packet("A1", packet)
+
+        assert received_messages == []
+
+    asyncio.run(case())
+
+
 def test_solicited_rsr_public_message_bypasses_stale_age_guard() -> None:
     async def case() -> None:
         local_identity = Identity.generate()

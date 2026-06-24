@@ -93,6 +93,9 @@ Behavior notes:
 - Newly seen direct peers get a local-only public sync request, and the CLI can
   answer `REQUEST_SYNC` packets with cached announces and public messages,
   marking solicited replay packets with the official `RSR` wire flag.
+- The CLI validates `RSR` catch-up packets against the peer that answered the
+  sync request, including replayed public messages originally authored by this
+  device.
 - The sync cache includes the CLI's own current announce, and reconnecting
   direct peers get a fresh public sync request.
 - Private messages are persisted separately from the public inbox and exposed
