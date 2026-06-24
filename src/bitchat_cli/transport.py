@@ -29,7 +29,7 @@ from .protocol import (
     make_public_message_packet,
     make_read_receipt_payload,
 )
-from .sync import GCSFilter, RequestSyncPacket, SyncTypeFlags, packet_sync_id
+from .sync import GCSFilter, RequestSyncManager, RequestSyncPacket, SyncTypeFlags, packet_sync_id
 
 
 SystemLogger = Callable[[str], None]
@@ -97,6 +97,7 @@ class BLEChatTransport:
         self._reconnect_ready_at: dict[str, float] = {}
         self._sync_announcements_by_peer: dict[str, Packet] = {}
         self._sync_public_messages: dict[str, Packet] = {}
+        self._request_sync_manager = RequestSyncManager()
         self._scan_task: asyncio.Task[None] | None = None
         self._connect_queue: asyncio.Queue[object] | None = None
         self._connect_workers: list[asyncio.Task[None]] = []
@@ -224,6 +225,7 @@ class BLEChatTransport:
         ids = self._sync_candidate_ids(types)
         p, m, data = GCSFilter.build_filter(ids=ids, max_bytes=128, target_fpr=0.01)
         request = RequestSyncPacket(p=p, m=m, data=data, types=types)
+        self._request_sync_manager.register_request(peer_id)
         packet = Packet(
             packet_type=MessageType.REQUEST_SYNC,
             sender_id=bytes.fromhex(self.identity.peer_id),
@@ -420,10 +422,17 @@ class BLEChatTransport:
         ):
             return
 
-        rejection_reason = self._ingress_time_rejection(packet)
-        if rejection_reason is not None:
-            self.system_log(rejection_reason)
+        if packet.is_rsr and not self._request_sync_manager.is_valid_response(
+            packet.sender_id.hex(),
+            is_rsr=True,
+        ):
+            self.system_log(f"Ignored unsolicited sync response from {packet.sender_id.hex()}.")
             return
+        if not packet.is_rsr:
+            rejection_reason = self._ingress_time_rejection(packet)
+            if rejection_reason is not None:
+                self.system_log(rejection_reason)
+                return
 
         packet_key = packet_cache_key(packet)
         if self._recent_seen_packets.mark_seen(packet_key):
@@ -490,6 +499,7 @@ class BLEChatTransport:
             signature=packet.signature,
             ttl=packet.ttl - 1,
             version=packet.version,
+            is_rsr=packet.is_rsr,
         )
         await self._broadcast_packet(relayed_packet, exclude_addresses={ingress_address})
 
@@ -503,6 +513,7 @@ class BLEChatTransport:
             signature=packet.signature,
             ttl=0,
             version=packet.version,
+            is_rsr=packet.is_rsr,
         )
 
     def _ingress_time_rejection(self, packet: Packet, *, now: datetime | None = None) -> str | None:
@@ -629,6 +640,7 @@ class BLEChatTransport:
                 signature=cached_packet.signature,
                 ttl=0,
                 version=cached_packet.version,
+                is_rsr=True,
             )
             await self._send_packet_to_peer(peer_id, response)
 
@@ -801,6 +813,7 @@ class BLEChatTransport:
             return
         self._last_runtime_prune_at = monotonic_now
         wall_now = now_wall or datetime.now(timezone.utc)
+        self._request_sync_manager.cleanup()
 
         reconnect_cutoff = monotonic_now - _STALE_RECONNECT_RETENTION_SECONDS
         self._reconnect_ready_at = {

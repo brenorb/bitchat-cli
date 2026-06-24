@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from dataclasses import dataclass
 from enum import IntEnum
+from typing import Callable
 
 from .protocol import Packet
 
@@ -151,6 +153,39 @@ class RequestSyncPacket:
             since_timestamp=since_timestamp,
             fragment_id_filter=fragment_id_filter,
         )
+
+
+class RequestSyncManager:
+    def __init__(
+        self,
+        *,
+        response_window_seconds: float = 30.0,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self.response_window_seconds = response_window_seconds
+        self.clock = clock or time.monotonic
+        self._pending_requests: dict[str, float] = {}
+
+    def register_request(self, peer_id: str) -> None:
+        self._pending_requests[peer_id] = self.clock()
+
+    def is_valid_response(self, peer_id: str, *, is_rsr: bool) -> bool:
+        if not is_rsr:
+            return False
+        self.cleanup()
+        request_time = self._pending_requests.get(peer_id)
+        if request_time is None:
+            return False
+        return self.clock() - request_time <= self.response_window_seconds
+
+    def cleanup(self) -> None:
+        now = self.clock()
+        cutoff = now - self.response_window_seconds
+        self._pending_requests = {
+            peer_id: request_time
+            for peer_id, request_time in self._pending_requests.items()
+            if request_time >= cutoff
+        }
 
 
 def packet_sync_id(packet: Packet) -> bytes:

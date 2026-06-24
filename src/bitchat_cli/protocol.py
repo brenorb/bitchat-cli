@@ -10,6 +10,7 @@ from .constants import (
     FLAG_HAS_RECIPIENT,
     FLAG_HAS_SIGNATURE,
     FLAG_IS_COMPRESSED,
+    FLAG_IS_RSR,
     MESSAGE_TTL,
     PADDING_BLOCK_SIZES,
     MessageType,
@@ -200,6 +201,7 @@ class Packet:
     signature: bytes | None = None
     ttl: int = MESSAGE_TTL
     version: int = 1
+    is_rsr: bool = False
 
     def encode(self, *, padding: bool = False) -> bytes:
         if self.version != 1:
@@ -217,6 +219,8 @@ class Packet:
             flags |= FLAG_HAS_SIGNATURE
         if is_compressed:
             flags |= FLAG_IS_COMPRESSED
+        if self.is_rsr:
+            flags |= FLAG_IS_RSR
 
         payload_bytes = payload
         if is_compressed and original_size is not None:
@@ -255,6 +259,7 @@ class Packet:
             signature=None,
             ttl=0,
             version=self.version,
+            is_rsr=False,
         )
         return unsigned.encode(padding=True)
 
@@ -333,6 +338,7 @@ class Packet:
             signature=signature,
             ttl=ttl,
             version=version,
+            is_rsr=bool(flags & FLAG_IS_RSR),
         )
 
 

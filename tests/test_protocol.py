@@ -1,5 +1,6 @@
 import pytest
 
+from bitchat_cli.constants import MessageType
 from bitchat_cli.crypto import Identity, peer_id_from_noise_public_key
 from bitchat_cli.protocol import (
     Announcement,
@@ -60,6 +61,42 @@ def test_signature_survives_ttl_relay_mutation() -> None:
     )
 
     assert relayed.verify_signature(identity.signing_public_key)
+
+
+def test_signature_survives_rsr_mutation() -> None:
+    identity = Identity.generate()
+    packet = make_public_message_packet(identity, "sync me", timestamp_ms=1_700_000_000_000)
+    decoded = Packet.decode(packet.encode(padding=False))
+
+    rsr = Packet(
+        packet_type=decoded.packet_type,
+        sender_id=decoded.sender_id,
+        payload=decoded.payload,
+        recipient_id=decoded.recipient_id,
+        timestamp_ms=decoded.timestamp_ms,
+        signature=decoded.signature,
+        ttl=decoded.ttl,
+        version=decoded.version,
+        is_rsr=True,
+    )
+
+    assert rsr.verify_signature(identity.signing_public_key)
+
+
+def test_packet_round_trip_preserves_rsr_flag() -> None:
+    identity = Identity.generate()
+    packet = Packet(
+        packet_type=MessageType.MESSAGE,
+        sender_id=bytes.fromhex(identity.peer_id),
+        payload=b"hello",
+        timestamp_ms=1_700_000_000_000,
+        is_rsr=True,
+    ).sign(identity)
+
+    decoded = Packet.decode(packet.encode(padding=False))
+
+    assert decoded.is_rsr is True
+    assert decoded.verify_signature(identity.signing_public_key)
 
 
 def test_announce_packet_signature_and_peer_binding() -> None:

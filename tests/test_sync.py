@@ -1,7 +1,14 @@
 from bitchat_cli.constants import MessageType
 from bitchat_cli.crypto import Identity
 from bitchat_cli.protocol import Packet, make_public_message_packet
-from bitchat_cli.sync import GCSFilter, RequestSyncPacket, SyncMessageType, SyncTypeFlags, packet_sync_id
+from bitchat_cli.sync import (
+    GCSFilter,
+    RequestSyncManager,
+    RequestSyncPacket,
+    SyncMessageType,
+    SyncTypeFlags,
+    packet_sync_id,
+)
 
 
 def test_request_sync_packet_round_trip() -> None:
@@ -60,3 +67,29 @@ def test_packet_sync_id_excludes_ttl() -> None:
     )
 
     assert packet_sync_id(packet) == packet_sync_id(relayed)
+
+
+def test_request_sync_manager_accepts_recent_rsr_from_requested_peer() -> None:
+    now = 1_000.0
+    manager = RequestSyncManager(response_window_seconds=30.0, clock=lambda: now)
+    peer_id = "aaaaaaaaaaaaaaaa"
+
+    manager.register_request(peer_id)
+    now = 1_020.0
+
+    assert manager.is_valid_response(peer_id, is_rsr=True) is True
+
+
+def test_request_sync_manager_rejects_unsolicited_non_rsr_and_expired_packets() -> None:
+    now = 1_000.0
+    manager = RequestSyncManager(response_window_seconds=30.0, clock=lambda: now)
+    peer_id = "bbbbbbbbbbbbbbbb"
+
+    manager.register_request(peer_id)
+
+    assert manager.is_valid_response(peer_id, is_rsr=False) is False
+    assert manager.is_valid_response("cccccccccccccccc", is_rsr=True) is False
+
+    now = 1_031.0
+
+    assert manager.is_valid_response(peer_id, is_rsr=True) is False
