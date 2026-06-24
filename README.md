@@ -89,6 +89,8 @@ Behavior notes:
   unbounded connect task per discovered device.
 - Newly seen direct peers get a local-only public sync request, and the CLI can
   answer `REQUEST_SYNC` packets with cached announces and public messages.
+- The sync cache includes the CLI's own current announce, and reconnecting
+  direct peers get a fresh public sync request.
 - Private messages are persisted separately from the public inbox and exposed
   through `bitchat dm inbox` and `bitchat dm history`.
 - Only one CLI BLE session can own the radio at a time, so `chat` and `daemon`

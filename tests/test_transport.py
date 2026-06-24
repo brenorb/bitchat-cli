@@ -913,3 +913,86 @@ def test_request_sync_filter_suppresses_known_public_packets() -> None:
         assert sent_packets == []
 
     asyncio.run(case())
+
+
+def test_request_sync_returns_local_announce_when_cached() -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        alice_identity = Identity.generate()
+        transport = _make_transport(
+            identity=local_identity,
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+        )
+        _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="A1")
+        transport.clients = {"A1": "A1"}  # type: ignore[assignment]
+
+        sent_packets: list[tuple[str, Packet]] = []
+
+        async def fake_send(peer_id: str, packet: Packet) -> bool:
+            sent_packets.append((peer_id, packet))
+            return True
+
+        transport._send_packet_to_peer = fake_send  # type: ignore[method-assign]
+
+        await transport.set_nickname("clanker")
+        sent_packets.clear()
+
+        request = RequestSyncPacket(
+            p=4,
+            m=1,
+            data=b"",
+            types=SyncTypeFlags.from_message_types([MessageType.ANNOUNCE]),
+        )
+        request_packet = Packet(
+            packet_type=MessageType.REQUEST_SYNC,
+            sender_id=bytes.fromhex(alice_identity.peer_id),
+            recipient_id=bytes.fromhex(local_identity.peer_id),
+            payload=request.encode(),
+            ttl=0,
+        ).sign(alice_identity)
+
+        await transport._handle_decoded_packet("A1", request_packet)
+
+        assert len(sent_packets) == 1
+        assert sent_packets[0][0] == alice_identity.peer_id
+        assert sent_packets[0][1].packet_type == MessageType.ANNOUNCE
+        announcement = Announcement.decode(sent_packets[0][1].payload)
+        assert announcement.nickname == "clanker"
+
+    asyncio.run(case())
+
+
+def test_reconnected_peer_announce_triggers_public_request_sync() -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        alice_identity = Identity.generate()
+        transport = _make_transport(
+            identity=local_identity,
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+        )
+        _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="A1")
+        transport.clients = {"A1": "A1"}  # type: ignore[assignment]
+        transport.known_peers[alice_identity.peer_id].active_address = "A1"
+        transport._on_disconnect("A1")
+
+        sent_packets: list[tuple[str, Packet]] = []
+
+        async def fake_send(peer_id: str, packet: Packet) -> bool:
+            sent_packets.append((peer_id, packet))
+            return True
+
+        transport._send_packet_to_peer = fake_send  # type: ignore[method-assign]
+
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        announce = make_announce_packet(alice_identity, "alice", timestamp_ms=now_ms)
+        await transport._handle_decoded_packet("A1", announce)
+
+        assert len(sent_packets) == 1
+        assert sent_packets[0][0] == alice_identity.peer_id
+        assert sent_packets[0][1].packet_type == MessageType.REQUEST_SYNC
+
+    asyncio.run(case())

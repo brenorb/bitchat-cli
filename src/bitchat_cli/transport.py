@@ -204,7 +204,9 @@ class BLEChatTransport:
 
     async def set_nickname(self, nickname: str) -> None:
         self.nickname = nickname
-        await self._broadcast_packet(self._make_announce_packet(nickname=nickname))
+        packet = self._make_announce_packet(nickname=nickname)
+        self._remember_sync_packet(packet)
+        await self._broadcast_packet(packet)
 
     async def send_public_message(self, content: str) -> None:
         packet = make_public_message_packet(self.identity, content)
@@ -335,7 +337,9 @@ class BLEChatTransport:
             )
             self.clients[address] = client
             self.system_log(f"Connected to BitChat peer at {address}.")
-            await self._write_packet(client, self._make_announce_packet())
+            packet = self._make_announce_packet()
+            self._remember_sync_packet(packet)
+            await self._write_packet(client, packet)
         except Exception as exc:
             self._record_reconnect_backoff(address, multiplier=1.0)
             self.system_log(f"Failed to connect to {address}: {exc}")
@@ -550,6 +554,7 @@ class BLEChatTransport:
 
         existing = self.known_peers.get(claimed_peer_id)
         is_new = existing is None
+        was_reconnected = existing is not None and existing.active_address is None
         peer = existing or PeerRecord(
             peer_id=claimed_peer_id,
             nickname=announcement.nickname,
@@ -568,6 +573,7 @@ class BLEChatTransport:
             self.peer_log(peer)
         if is_new:
             self.system_log(f"Peer online: {peer.nickname} ({peer.peer_id}).")
+        if is_new or was_reconnected:
             await self.send_request_sync(claimed_peer_id)
         if claimed_peer_id in self._pending_noise_payloads:
             await self._initiate_noise_handshake(claimed_peer_id)
