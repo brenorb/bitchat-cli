@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .constants import CHARACTERISTIC_UUID, SERVICE_UUID
-from .files import format_file_size, load_outgoing_file
+from .files import load_outgoing_file
 from .geochat import (
     GeoChatDaemon,
     decode_bounds,
@@ -39,13 +39,23 @@ from .network import (
 )
 from .nostr import NostrDMClient, NostrIdentity, decode_npub
 from .peripheral import create_peripheral_endpoint, peripheral_supported
+from .queries import (
+    attachment_summary as _attachment_summary,
+    geohash_participants as _geohash_participants,
+    pending_read_receipt_ids as _pending_read_receipt_ids,
+    read_dm_records as _read_dm_records,
+    read_public_records as _read_public_records,
+    resolve_peer_or_social_target as _resolve_peer_or_social_target,
+    resolve_peer_record as _resolve_peer_record,
+    resolve_social_record as _resolve_social_record,
+    social_store as _social_store,
+)
 from .social import SocialStore
 from .state import ActiveSessionLease, MessageStore, PeerStore, RuntimePaths, StateStore, pid_is_running
 from .transport import BLEChatTransport
 
 _PERIPHERAL_SUBSCRIBE_ANNOUNCE_DELAY_SECONDS = 0.4
 _MESH_CONVERSATION_ID = "mesh"
-_GEOHASH_PARTICIPANT_TTL_SECONDS = 300
 _HIGH_PRECISION_GEOHASH_WARNING_LENGTH = 7
 _MEDIUM_PRECISION_GEOHASH_WARNING_LENGTH = 6
 
@@ -76,55 +86,6 @@ def _resolve_peer_target(transport: BLEChatTransport, raw_target: str):
     if len(nickname_match) > 1:
         raise ValueError(f"ambiguous nickname: {raw_target}")
     raise ValueError(f"unknown peer: {raw_target}")
-
-
-def _resolve_peer_record(records: list[dict[str, object]], raw_target: str) -> dict[str, object]:
-    target = raw_target.strip()
-    if target.startswith("@"):
-        target = target[1:]
-    direct_match = [record for record in records if record.get("peer_id") == target]
-    if direct_match:
-        return direct_match[0]
-    nickname_match = [record for record in records if record.get("nickname") == target]
-    if len(nickname_match) == 1:
-        return nickname_match[0]
-    if len(nickname_match) > 1:
-        raise ValueError(f"ambiguous nickname: {raw_target}")
-    raise ValueError(f"unknown peer: {raw_target}")
-
-
-def _resolve_social_record(records: list[dict[str, object]], raw_target: str) -> dict[str, object]:
-    target = raw_target.strip()
-    if target.startswith("@"):
-        target = target[1:]
-    direct_match = [record for record in records if record.get("peer_id") == target]
-    if direct_match:
-        return direct_match[0]
-    nickname_match = [record for record in records if record.get("nickname") == target]
-    if len(nickname_match) == 1:
-        return nickname_match[0]
-    if len(nickname_match) > 1:
-        raise ValueError(f"ambiguous nickname: {raw_target}")
-    raise ValueError(f"unknown peer: {raw_target}")
-
-
-def _read_dm_records(runtime: RuntimePaths) -> list[dict[str, object]]:
-    rows = MessageStore(runtime.inbox_path).read_all(deduplicate=True)
-    return [row for row in rows if row.get("scope") == "dm"]
-
-
-def _read_public_records(runtime: RuntimePaths) -> list[dict[str, object]]:
-    rows = MessageStore(runtime.inbox_path).read_all(deduplicate=True)
-    return [row for row in rows if row.get("direction") == "inbound" and row.get("scope", "public") == "public"]
-
-
-def _attachment_label(row: dict[str, object]) -> str:
-    mime_type = str(row.get("attachment_mime") or "")
-    return "image" if mime_type.startswith("image/") else "file"
-
-
-def _social_store(runtime: RuntimePaths) -> SocialStore:
-    return SocialStore(runtime.social_path)
 
 
 def _network_config_from_state(store: StateStore) -> NetworkConfig:
@@ -169,19 +130,6 @@ def _eligible_nostr_fallback_record(
     return record
 
 
-def _attachment_summary(row: dict[str, object]) -> str:
-    label = _attachment_label(row)
-    name = str(row.get("attachment_name") or Path(str(row.get("content") or "file")).name or "file")
-    size_bytes = row.get("attachment_size_bytes")
-    size_suffix = (
-        f" ({format_file_size(int(size_bytes))})"
-        if isinstance(size_bytes, int)
-        else ""
-    )
-    path_suffix = f" -> {row.get('content')}" if row.get("content") else ""
-    return f"[{label}] {name}{size_suffix}{path_suffix}"
-
-
 def _record_geohash_event(
     event: dict[str, object],
     *,
@@ -223,42 +171,6 @@ def _record_geohash_event(
     )
 
 
-def _geohash_participants(
-    records: list[dict[str, object]],
-    *,
-    geohash: str,
-    self_pubkey: str,
-    now: datetime,
-) -> list[dict[str, str]]:
-    cutoff = now.astimezone(timezone.utc).timestamp() - _GEOHASH_PARTICIPANT_TTL_SECONDS
-    participants: dict[str, dict[str, str]] = {}
-    for row in records:
-        if str(row.get("conversation_id") or "") != geohash:
-            continue
-        if str(row.get("message_kind") or "") not in {"geohash_message", "geohash_presence"}:
-            continue
-        peer_id = str(row.get("peer_id") or "")
-        if not peer_id or peer_id == self_pubkey:
-            continue
-        timestamp_raw = str(row.get("timestamp") or "")
-        if not timestamp_raw:
-            continue
-        timestamp = datetime.fromisoformat(timestamp_raw).astimezone(timezone.utc)
-        if timestamp.timestamp() < cutoff:
-            continue
-        current = participants.get(peer_id)
-        if current is not None and str(current["last_seen"]) >= timestamp.isoformat():
-            continue
-        participants[peer_id] = {
-            "peer_id": peer_id,
-            "sender": str(row.get("sender") or ""),
-            "last_seen": timestamp.isoformat(),
-            "message_kind": str(row.get("message_kind") or ""),
-            "teleported": bool(row.get("teleported") or False),
-        }
-    return sorted(participants.values(), key=lambda row: row["last_seen"], reverse=True)
-
-
 def _send_daemon_command(runtime: RuntimePaths, payload: dict[str, object]) -> dict[str, object]:
     if not runtime.daemon_socket_path.exists():
         raise RuntimeError("daemon socket not found; start `bitchat daemon start` first")
@@ -282,30 +194,6 @@ def _send_daemon_command(runtime: RuntimePaths, payload: dict[str, object]) -> d
     if not decoded.get("ok", False):
         raise RuntimeError(str(decoded.get("error") or "daemon command failed"))
     return decoded
-
-
-def _pending_read_receipt_ids(rows: list[dict[str, object]], peer_id: str) -> list[str]:
-    sent = {
-        str(row.get("message_id"))
-        for row in rows
-        if row.get("message_kind") == "receipt"
-        and row.get("direction") == "outbound"
-        and row.get("peer_id") == peer_id
-        and row.get("content") == "read_receipt"
-    }
-    pending: list[str] = []
-    for row in rows:
-        if row.get("message_kind") != "private_message":
-            continue
-        if row.get("direction") != "inbound":
-            continue
-        if row.get("peer_id") != peer_id:
-            continue
-        message_id = str(row.get("message_id") or "")
-        if not message_id or message_id in sent:
-            continue
-        pending.append(message_id)
-    return pending
 
 
 def doctor_payload(store: StateStore) -> dict[str, object]:
@@ -360,7 +248,7 @@ def run_doctor(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
         return 0
 
-    print("bitchat-cli doctor")
+    print("bitchat doctor")
     print(f"nickname:           {payload['nickname']}")
     print(f"peer_id:            {payload['peer_id']}")
     print(f"nostr_npub:         {payload['nostr_npub']}")
@@ -379,7 +267,6 @@ def run_doctor(args: argparse.Namespace) -> int:
     print(f"proxy_mode:         {payload['network']['mode']}")
     print(f"proxy_policy:       {payload['network']['policy']}")
     print(f"proxy_target:       {payload['network']['target']}")
-    print(f"geo_lookup:         {payload['network']['lookup_provider']}")
     print("scope:")
     for key, value in payload["scope"].items():
         print(f"  {key}: {value}")
@@ -632,7 +519,7 @@ async def run_chat(args: argparse.Namespace) -> int:
         await transport.start()
         reader, stdin_transport = await _open_stdin_reader()
 
-        print(f"welcome to bitchat-cli; nickname={state.nickname} peer_id={state.identity.peer_id}")
+        print(f"welcome to bitchat; nickname={state.nickname} peer_id={state.identity.peer_id}")
         print("type /help for commands")
         while True:
             print("> ", end="", flush=True)
@@ -1552,15 +1439,6 @@ def _normalize_geo_target(raw: str) -> str:
         raise RuntimeError(str(exc)) from exc
 
 
-def _resolve_peer_or_social_target(runtime: RuntimePaths, raw_target: str) -> dict[str, object]:
-    peer_rows = PeerStore(runtime.peers_path).read_all()
-    try:
-        return _resolve_peer_record(peer_rows, raw_target)
-    except ValueError:
-        social_rows = _social_store(runtime).read_all()
-        return _resolve_social_record(social_rows, raw_target)
-
-
 def run_inbox(args: argparse.Namespace) -> int:
     runtime = RuntimePaths()
     records = [
@@ -1687,7 +1565,6 @@ def run_geo_lookup(args: argparse.Namespace) -> int:
         results = lookup_place(
             args.query,
             network_config=NetworkConfig.from_state(state),
-            provider=args.provider,
             limit=int(args.limit),
         )
     except Exception as exc:
@@ -1878,7 +1755,6 @@ def run_network_proxy_status(args: argparse.Namespace) -> int:
     print(f"mode:            {payload['mode']}")
     print(f"policy:          {payload['policy']}")
     print(f"target:          {payload['target']}")
-    print(f"lookup_provider: {payload['lookup_provider']}")
     healthy = payload.get("healthy")
     print(f"healthy:         {healthy if healthy is not None else 'unknown'}")
     return 0
