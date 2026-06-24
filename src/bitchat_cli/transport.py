@@ -40,6 +40,9 @@ ReceiptLogger = Callable[[str, str, str, datetime], None]
 _MAX_PENDING_NOISE_PAYLOADS_PER_PEER = 32
 _MAX_NOTIFICATION_QUEUE_SIZE = 256
 _NOTIFICATION_WORKER_COUNT = 1
+_RUNTIME_PRUNE_INTERVAL_SECONDS = 30.0
+_STALE_PEER_RETENTION_SECONDS = 900.0
+_STALE_RECONNECT_RETENTION_SECONDS = 300.0
 
 
 @dataclass(slots=True)
@@ -92,6 +95,7 @@ class BLEChatTransport:
         self._scanner: BleakScanner | None = None
         self._scanner_running = False
         self._stop_event = asyncio.Event()
+        self._last_runtime_prune_at = 0.0
 
     async def start(self) -> None:
         self._stop_event.clear()
@@ -211,6 +215,7 @@ class BLEChatTransport:
             scan_on_duration = max(1.0, self.scan_interval)
             scan_off_duration = max(scan_on_duration * 2.0, 10.0)
             while not self._stop_event.is_set():
+                self._prune_runtime_state()
                 await self._set_scanning(True)
                 try:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=scan_on_duration)
@@ -253,6 +258,7 @@ class BLEChatTransport:
                 self._scanner_running = False
 
     def _handle_discovered_device(self, device, _advertisement_data) -> None:
+        self._prune_runtime_state()
         address = getattr(device, "address", None)
         if not address or address in self.clients or address in self.connecting:
             return
@@ -291,9 +297,11 @@ class BLEChatTransport:
     def _on_disconnect(self, address: str) -> None:
         self._record_reconnect_backoff(address, multiplier=1.0 if self.background_mode else 0.4)
         if self.clients.pop(address, None) is not None:
+            self._remove_address_from_peers(address)
             self.system_log(f"Disconnected from {address}.")
 
     async def _handle_notification(self, address: str, data: bytes) -> None:
+        self._prune_runtime_state()
         try:
             packet = Packet.decode(data)
         except Exception:
@@ -579,6 +587,48 @@ class BLEChatTransport:
         peer = self.known_peers.get(peer_id)
         if peer is not None:
             self.system_log(f"Peer left: {peer.nickname} ({peer.peer_id}).")
+
+    def _remove_address_from_peers(self, address: str) -> None:
+        for peer in self.known_peers.values():
+            if address in peer.addresses:
+                peer.addresses.discard(address)
+                if peer.active_address == address:
+                    peer.active_address = None
+
+    def _prune_runtime_state(
+        self,
+        *,
+        now_monotonic: float | None = None,
+        now_wall: datetime | None = None,
+        force: bool = False,
+    ) -> None:
+        monotonic_now = now_monotonic if now_monotonic is not None else time.monotonic()
+        if not force and monotonic_now - self._last_runtime_prune_at < _RUNTIME_PRUNE_INTERVAL_SECONDS:
+            return
+        self._last_runtime_prune_at = monotonic_now
+        wall_now = now_wall or datetime.now(timezone.utc)
+
+        reconnect_cutoff = monotonic_now - _STALE_RECONNECT_RETENTION_SECONDS
+        self._reconnect_ready_at = {
+            address: ready_at
+            for address, ready_at in self._reconnect_ready_at.items()
+            if ready_at >= reconnect_cutoff
+        }
+
+        stale_cutoff = wall_now.timestamp() - _STALE_PEER_RETENTION_SECONDS
+        stale_peer_ids: list[str] = []
+        live_addresses = set(self.clients)
+        for peer_id, peer in self.known_peers.items():
+            peer.addresses.intersection_update(live_addresses)
+            if peer.active_address not in live_addresses:
+                peer.active_address = None
+            if peer.last_seen.timestamp() < stale_cutoff and not peer.addresses:
+                stale_peer_ids.append(peer_id)
+
+        for peer_id in stale_peer_ids:
+            self.known_peers.pop(peer_id, None)
+            self._noise_sessions.pop(peer_id, None)
+            self._pending_noise_payloads.pop(peer_id, None)
 
     async def _send_noise_payload(self, peer_id: str, typed_payload: bytes) -> None:
         session = self._noise_sessions.get(peer_id)

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from bitchat_cli.constants import MessageType
 from bitchat_cli.crypto import Identity
@@ -546,3 +547,72 @@ def test_fragment_relays_before_full_reassembly() -> None:
         assert len(relayed_packets) == len(fragments)
 
     asyncio.run(case())
+
+
+def test_disconnect_clears_peer_active_address_and_disconnected_link() -> None:
+    transport = _make_transport(
+        identity=Identity.generate(),
+        nickname="local",
+        private_messages=[],
+        receipts=[],
+    )
+    peer_identity = Identity.generate()
+    _register_known_peer(transport, peer_identity=peer_identity, nickname="peer", address="B1")
+    peer = transport.known_peers[peer_identity.peer_id]
+    peer.addresses.add("B2")
+    peer.active_address = "B2"
+    transport.clients = {"B2": "B2"}  # type: ignore[assignment]
+
+    transport._on_disconnect("B2")
+
+    assert transport.clients == {}
+    assert peer.addresses == {"B1"}
+    assert peer.active_address is None
+
+
+def test_prune_runtime_state_removes_stale_peer_and_backoff_entries() -> None:
+    transport = _make_transport(
+        identity=Identity.generate(),
+        nickname="local",
+        private_messages=[],
+        receipts=[],
+    )
+    stale_identity = Identity.generate()
+    fresh_identity = Identity.generate()
+    stale_seen = datetime.now(timezone.utc) - timedelta(hours=2)
+    fresh_seen = datetime.now(timezone.utc)
+    transport.known_peers[stale_identity.peer_id] = PeerRecord(
+        peer_id=stale_identity.peer_id,
+        nickname="stale",
+        noise_public_key=stale_identity.noise_public_key,
+        signing_public_key=stale_identity.signing_public_key,
+        addresses={"STALE"},
+        active_address="STALE",
+        last_seen=stale_seen,
+    )
+    transport.known_peers[fresh_identity.peer_id] = PeerRecord(
+        peer_id=fresh_identity.peer_id,
+        nickname="fresh",
+        noise_public_key=fresh_identity.noise_public_key,
+        signing_public_key=fresh_identity.signing_public_key,
+        addresses={"FRESH"},
+        active_address="FRESH",
+        last_seen=fresh_seen,
+    )
+    transport.clients = {"FRESH": "FRESH"}  # type: ignore[assignment]
+    transport._noise_sessions[stale_identity.peer_id] = object()  # type: ignore[assignment]
+    transport._pending_noise_payloads[stale_identity.peer_id] = deque([b"pending"])
+    transport._reconnect_ready_at["old-address"] = 10.0
+    transport._reconnect_ready_at["fresh-address"] = 590.0
+
+    transport._prune_runtime_state(now_monotonic=600.0, now_wall=datetime.now(timezone.utc), force=True)
+
+    assert stale_identity.peer_id not in transport.known_peers
+    assert stale_identity.peer_id not in transport._noise_sessions
+    assert stale_identity.peer_id not in transport._pending_noise_payloads
+    assert "old-address" not in transport._reconnect_ready_at
+    assert "fresh-address" in transport._reconnect_ready_at
+
+    fresh_peer = transport.known_peers[fresh_identity.peer_id]
+    assert fresh_peer.addresses == {"FRESH"}
+    assert fresh_peer.active_address == "FRESH"

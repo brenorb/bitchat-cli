@@ -78,6 +78,8 @@ Behavior notes:
   same packet to every historical address we have seen for that peer.
 - The daemon now processes inbound BLE notifications through a bounded worker
   queue instead of spawning an unbounded task per packet.
+- Long-lived daemon state is pruned periodically so stale reconnect timers,
+  dead peer links, and orphaned DM session state do not accumulate forever.
 - Private messages are persisted separately from the public inbox and exposed
   through `bitchat dm inbox` and `bitchat dm history`.
 - Only one CLI BLE session can own the radio at a time, so `chat` and `daemon`
