@@ -60,6 +60,7 @@ uv run bitchat geo watch add u4pruy
 uv run bitchat geo send u4pruy "hello #u4pruy"
 uv run bitchat geo send u4pruy --pow 12 "hello with PoW"
 uv run bitchat geo inbox u4pruy --tail 20
+uv run bitchat geo who u4pruy
 uv run bitchat peers
 uv run bitchat inbox --tail 20
 uv run bitchat mesh inbox --tail 20
@@ -117,6 +118,8 @@ Behavior notes:
 - `inbox` is the `#mesh` view for the BLE public conversation, and `mesh send`
   / `mesh inbox` expose that same scope explicitly in the CLI.
 - `geo inbox <geohash>` is the inbound view for one location channel.
+- `geo who <geohash>` lists recently seen participants from geohash messages and
+  presence heartbeats, excluding the CLI's own derived geohash identity.
 - The macOS peripheral endpoint now exposes the same BLE characteristic surface
   the official app does for inbound writes: notify, read, write, and
   write-without-response.

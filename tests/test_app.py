@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 from datetime import datetime, timezone
 from pathlib import Path
 
-from bitchat_cli import app
+from bitchat_cli import app, geochat
 from bitchat_cli.crypto import Identity
 from bitchat_cli.peripheral import NullPeripheralEndpoint
 from bitchat_cli.state import MessageStore, PeerStore, RuntimePaths
@@ -347,6 +348,43 @@ def test_run_geo_watch_add_persists_normalized_geohash(tmp_path: Path, monkeypat
     assert "u4pruy" in captured.out
 
 
+def test_record_geohash_event_persists_presence_without_printing(tmp_path: Path) -> None:
+    store = MessageStore(tmp_path / "messages.jsonl")
+    log_handle = io.StringIO()
+
+    app._record_geohash_event(
+        {
+            "id": "evt-1",
+            "pubkey": "ab" * 32,
+            "created_at": 1_719_188_400,
+            "kind": 20001,
+            "tags": [["g", "u4pruy"], ["n", "bubbles"]],
+            "content": "",
+        },
+        message_store=store,
+        log_handle=log_handle,
+    )
+
+    rows = store.read_all()
+    assert rows == [
+        {
+            "recorded_at": rows[0]["recorded_at"],
+            "timestamp": "2024-06-24T00:20:00+00:00",
+            "direction": "inbound",
+            "sender": "bubbles#abab",
+            "peer_id": "ab" * 32,
+            "content": "",
+            "message_id": "evt-1",
+            "scope": "public",
+            "conversation_id": "u4pruy",
+            "message_kind": "geohash_presence",
+            "target_peer_id": None,
+            "delivery_state": None,
+        }
+    ]
+    assert log_handle.getvalue() == ""
+
+
 def test_run_geo_send_passes_pow_difficulty_to_daemon(tmp_path: Path, monkeypatch, capsys) -> None:
     runtime = RuntimePaths(tmp_path)
     commands: list[dict[str, object]] = []
@@ -370,6 +408,83 @@ def test_run_geo_send_passes_pow_difficulty_to_daemon(tmp_path: Path, monkeypatc
         }
     ]
     assert "queued geohash message" in captured.out
+
+
+def test_run_geo_who_lists_recent_participants_and_excludes_self(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    state_store = app.StateStore(runtime.state_path)
+    state = state_store.load()
+    state.nostr_device_seed_hex = "11" * 32
+    state_store.save(state)
+
+    self_pubkey = geochat.derive_nostr_identity(bytes.fromhex(state.nostr_device_seed_hex), "u4pruy").public_key_hex
+    store = MessageStore(runtime.inbox_path)
+    store.append(
+        direction="inbound",
+        sender="bubbles#931e",
+        content="",
+        timestamp=datetime(2026, 6, 24, 12, 0, 0, tzinfo=timezone.utc),
+        peer_id="22" * 32,
+        message_id="geo-presence-1",
+        scope="public",
+        conversation_id="u4pruy",
+        message_kind="geohash_presence",
+    )
+    store.append(
+        direction="inbound",
+        sender="bubbles#931e",
+        content="hello geo",
+        timestamp=datetime(2026, 6, 24, 12, 1, 0, tzinfo=timezone.utc),
+        peer_id="22" * 32,
+        message_id="geo-msg-1",
+        scope="public",
+        conversation_id="u4pruy",
+        message_kind="geohash_message",
+    )
+    store.append(
+        direction="inbound",
+        sender="clanker#1234",
+        content="self echo",
+        timestamp=datetime(2026, 6, 24, 12, 1, 30, tzinfo=timezone.utc),
+        peer_id=self_pubkey,
+        message_id="geo-self-1",
+        scope="public",
+        conversation_id="u4pruy",
+        message_kind="geohash_message",
+    )
+    store.append(
+        direction="inbound",
+        sender="oldie#0001",
+        content="",
+        timestamp=datetime(2026, 6, 24, 11, 40, 0, tzinfo=timezone.utc),
+        peer_id="33" * 32,
+        message_id="geo-old-1",
+        scope="public",
+        conversation_id="u4pruy",
+        message_kind="geohash_presence",
+    )
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+    monkeypatch.setattr(
+        app,
+        "datetime",
+        type(
+            "FrozenDateTime",
+            (),
+            {
+                "now": staticmethod(lambda tz=None: datetime(2026, 6, 24, 12, 4, 0, tzinfo=tz or timezone.utc)),
+                "fromtimestamp": staticmethod(datetime.fromtimestamp),
+                "fromisoformat": staticmethod(datetime.fromisoformat),
+            },
+        ),
+    )
+
+    exit_code = app.run_geo_who(argparse.Namespace(geohash="#u4pruy", json=False))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "bubbles#931e" in captured.out
+    assert "clanker#1234" not in captured.out
+    assert "oldie#0001" not in captured.out
 
 
 def test_run_geo_watch_list_prints_configured_geohashes(tmp_path: Path, monkeypatch, capsys) -> None:

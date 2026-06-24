@@ -39,3 +39,13 @@ def test_geo_watch_add_parser_routes_to_geo_watch_add_handler() -> None:
 
     assert args.handler is app.run_geo_watch_add
     assert args.geohash == "u4pruy"
+
+
+def test_geo_who_parser_routes_to_geo_who_handler() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["geo", "who", "#u4pruy", "--json"])
+
+    assert args.handler is app.run_geo_who
+    assert args.geohash == "#u4pruy"
+    assert args.json is True

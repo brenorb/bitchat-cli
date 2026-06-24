@@ -15,6 +15,7 @@ from .app import (
     run_doctor,
     run_geo_inbox,
     run_geo_send,
+    run_geo_who,
     run_geo_watch_add,
     run_geo_watch_list,
     run_geo_watch_remove,
@@ -97,6 +98,11 @@ def build_parser() -> argparse.ArgumentParser:
     geo_inbox.add_argument("--json", action="store_true", help="Output JSON")
     geo_inbox.add_argument("--tail", type=int, help="Show only the last N inbound messages")
     geo_inbox.set_defaults(handler=run_geo_inbox)
+
+    geo_who = geo_subparsers.add_parser("who", help="Show recently seen participants for one geohash channel")
+    geo_who.add_argument("geohash", help="Target geohash, with or without leading #")
+    geo_who.add_argument("--json", action="store_true", help="Output JSON")
+    geo_who.set_defaults(handler=run_geo_who)
 
     geo_watch = geo_subparsers.add_parser("watch", help="Manage background geohash subscriptions")
     geo_watch_subparsers = geo_watch.add_subparsers(dest="geo_watch_command", required=True)

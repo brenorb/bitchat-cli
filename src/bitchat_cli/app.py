@@ -13,13 +13,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .constants import CHARACTERISTIC_UUID, SERVICE_UUID
-from .geochat import GeoChatDaemon, event_display_name, event_geohash, normalize_geohash
+from .geochat import GeoChatDaemon, derive_nostr_identity, event_display_name, event_geohash, normalize_geohash
 from .peripheral import create_peripheral_endpoint, peripheral_supported
 from .state import ActiveSessionLease, MessageStore, PeerStore, RuntimePaths, StateStore, pid_is_running
 from .transport import BLEChatTransport
 
 _PERIPHERAL_SUBSCRIBE_ANNOUNCE_DELAY_SECONDS = 0.4
 _MESH_CONVERSATION_ID = "mesh"
+_GEOHASH_PARTICIPANT_TTL_SECONDS = 300
 
 
 def _clear_screen() -> None:
@@ -73,6 +74,76 @@ def _read_dm_records(runtime: RuntimePaths) -> list[dict[str, object]]:
 def _read_public_records(runtime: RuntimePaths) -> list[dict[str, object]]:
     rows = MessageStore(runtime.inbox_path).read_all(deduplicate=True)
     return [row for row in rows if row.get("direction") == "inbound" and row.get("scope", "public") == "public"]
+
+
+def _record_geohash_event(
+    event: dict[str, object],
+    *,
+    message_store: MessageStore,
+    log_handle,
+) -> None:
+    geohash = event_geohash(event)
+    if geohash is None:
+        return
+    raw_ts = int(event.get("created_at") or 0)
+    timestamp = datetime.fromtimestamp(raw_ts, tz=timezone.utc)
+    sender_name = event_display_name(event)
+    content = str(event.get("content") or "").strip()
+    kind = int(event.get("kind") or 0)
+    message_kind = "geohash_presence" if kind == 20001 else "geohash_message"
+    message_store.append(
+        direction="inbound",
+        sender=sender_name,
+        content=content,
+        timestamp=timestamp,
+        peer_id=str(event.get("pubkey") or ""),
+        message_id=str(event.get("id") or ""),
+        scope="public",
+        conversation_id=geohash,
+        message_kind=message_kind,
+    )
+    if kind == 20001:
+        return
+    print(
+        f"{timestamp.astimezone(timezone.utc).isoformat()} #{geohash} <{sender_name}> {content}",
+        file=log_handle,
+        flush=True,
+    )
+
+
+def _geohash_participants(
+    records: list[dict[str, object]],
+    *,
+    geohash: str,
+    self_pubkey: str,
+    now: datetime,
+) -> list[dict[str, str]]:
+    cutoff = now.astimezone(timezone.utc).timestamp() - _GEOHASH_PARTICIPANT_TTL_SECONDS
+    participants: dict[str, dict[str, str]] = {}
+    for row in records:
+        if str(row.get("conversation_id") or "") != geohash:
+            continue
+        if str(row.get("message_kind") or "") not in {"geohash_message", "geohash_presence"}:
+            continue
+        peer_id = str(row.get("peer_id") or "")
+        if not peer_id or peer_id == self_pubkey:
+            continue
+        timestamp_raw = str(row.get("timestamp") or "")
+        if not timestamp_raw:
+            continue
+        timestamp = datetime.fromisoformat(timestamp_raw).astimezone(timezone.utc)
+        if timestamp.timestamp() < cutoff:
+            continue
+        current = participants.get(peer_id)
+        if current is not None and str(current["last_seen"]) >= timestamp.isoformat():
+            continue
+        participants[peer_id] = {
+            "peer_id": peer_id,
+            "sender": str(row.get("sender") or ""),
+            "last_seen": timestamp.isoformat(),
+            "message_kind": str(row.get("message_kind") or ""),
+        }
+    return sorted(participants.values(), key=lambda row: row["last_seen"], reverse=True)
 
 
 def _send_daemon_command(runtime: RuntimePaths, payload: dict[str, object]) -> dict[str, object]:
@@ -620,32 +691,7 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
             )
 
         def daemon_geohash_message_log(event: dict[str, object]) -> None:
-            geohash = event_geohash(event)
-            if geohash is None:
-                return
-            raw_ts = int(event.get("created_at") or 0)
-            timestamp = datetime.fromtimestamp(raw_ts, tz=timezone.utc)
-            sender_name = event_display_name(event)
-            content = str(event.get("content") or "").strip()
-            kind = int(event.get("kind") or 0)
-            if kind == 20001:
-                return
-            message_store.append(
-                direction="inbound",
-                sender=sender_name,
-                content=content,
-                timestamp=timestamp,
-                peer_id=str(event.get("pubkey") or ""),
-                message_id=str(event.get("id") or ""),
-                scope="public",
-                conversation_id=geohash,
-                message_kind="geohash_message",
-            )
-            print(
-                f"{timestamp.astimezone(timezone.utc).isoformat()} #{geohash} <{sender_name}> {content}",
-                file=log_handle,
-                flush=True,
-            )
+            _record_geohash_event(event, message_store=message_store, log_handle=log_handle)
 
         def daemon_receipt_log(peer_id: str, receipt_type: str, message_id: str, timestamp: datetime) -> None:
             active_transport = transport_ref.get("value")
@@ -1087,6 +1133,7 @@ def run_geo_inbox(args: argparse.Namespace) -> int:
         row
         for row in _read_public_records(runtime)
         if str(row.get("conversation_id") or "") == geohash
+        and str(row.get("message_kind") or "") == "geohash_message"
     ]
     if args.tail is not None:
         records = records[-args.tail :]
@@ -1098,6 +1145,32 @@ def run_geo_inbox(args: argparse.Namespace) -> int:
         return 0
     for row in records:
         print(f"{row['timestamp']} #{geohash} <{row['sender']}> {row['content']}")
+    return 0
+
+
+def run_geo_who(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    try:
+        geohash = _normalize_geo_target(args.geohash)
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
+    state = StateStore(runtime.state_path).load()
+    participants = _geohash_participants(
+        _read_public_records(runtime),
+        geohash=geohash,
+        self_pubkey=derive_nostr_identity(bytes.fromhex(state.nostr_device_seed_hex), geohash).public_key_hex,
+        now=datetime.now(timezone.utc),
+    )
+    if args.json:
+        print(json.dumps(participants, indent=2))
+        return 0
+    if not participants:
+        print("no one else is around right now.")
+        return 0
+    print(f"#{geohash} participants")
+    for row in participants:
+        print(f"{row['sender']:20} {row['last_seen']}")
     return 0
 
 
