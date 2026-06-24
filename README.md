@@ -75,6 +75,9 @@ Behavior notes:
 - The daemon now follows the macOS app's basic scanning shape: duty-cycled
   background scanning instead of a tight `discover()` loop, with longer idle
   and connected off-windows to reduce background Bluetooth churn.
+- When the daemon has no live peers yet, it now keeps scanning continuously for
+  a short discovery grace window before falling back to longer off-windows, and
+  active peripheral subscribers count as live peers for that backoff policy.
 - `messages.jsonl` now suppresses repeated writes for the same stable
   `message_id`, so sync replay after reconnect or restart does not re-persist
   already recorded public packets, and `inbox` stays deduplicated too.

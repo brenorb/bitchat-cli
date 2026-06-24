@@ -56,6 +56,7 @@ _SUPPORTED_SYNC_TYPES = SyncTypeFlags.from_message_types(
 )
 _BACKGROUND_CONNECTED_SCAN_OFF_SECONDS = 30.0
 _BACKGROUND_IDLE_SCAN_OFF_SECONDS = 60.0
+_BACKGROUND_DISCOVERY_GRACE_SECONDS = 20.0
 _BACKGROUND_IDLE_THRESHOLD_SECONDS = 60.0
 _MAX_BACKGROUND_SCAN_OFF_SECONDS = 120.0
 _MAX_RECONNECT_BACKOFF_SECONDS = 120.0
@@ -297,6 +298,8 @@ class BLEChatTransport:
                 except asyncio.TimeoutError:
                     pass
 
+                if scan_off_duration <= 0.0:
+                    continue
                 await self._set_scanning(False)
                 try:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=scan_off_duration)
@@ -1098,8 +1101,11 @@ class BLEChatTransport:
         scan_on_duration = max(1.0, self.scan_interval)
         scan_off_duration = max(scan_on_duration * 2.0, 10.0)
         idle_for = max(0.0, now - self._last_mesh_activity_at)
-        if self.clients:
+        live_link_count = len(self.clients) + self.peripheral_endpoint.subscriber_count()
+        if live_link_count:
             scan_off_duration = max(scan_off_duration, _BACKGROUND_CONNECTED_SCAN_OFF_SECONDS)
+        elif idle_for < _BACKGROUND_DISCOVERY_GRACE_SECONDS:
+            scan_off_duration = 0.0
         elif idle_for >= _BACKGROUND_IDLE_THRESHOLD_SECONDS:
             scan_off_duration = max(scan_off_duration, _BACKGROUND_IDLE_SCAN_OFF_SECONDS)
         return scan_on_duration, min(scan_off_duration, _MAX_BACKGROUND_SCAN_OFF_SECONDS)

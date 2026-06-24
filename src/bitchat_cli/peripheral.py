@@ -18,6 +18,8 @@ class PeripheralEndpoint(Protocol):
 
     def stop(self) -> None: ...
 
+    def subscriber_count(self) -> int: ...
+
     def send(
         self,
         data: bytes,
@@ -33,6 +35,9 @@ class NullPeripheralEndpoint:
 
     def stop(self) -> None:
         return None
+
+    def subscriber_count(self) -> int:
+        return 0
 
     def send(
         self,
@@ -204,6 +209,9 @@ class MacOSPeripheralEndpoint:
         self._characteristic = None
         self._service = None
 
+    def subscriber_count(self) -> int:
+        return len(self._subscribed_centrals)
+
     def send(
         self,
         data: bytes,
@@ -363,4 +371,3 @@ class MacOSPeripheralEndpoint:
             address = _central_address(central)
             self._loop.call_soon_threadsafe(self._on_write, address, data)
             manager.respondToRequest_withResult_(request, self._CoreBluetooth.CBATTErrorSuccess)
-

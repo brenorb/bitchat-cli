@@ -47,6 +47,9 @@ class FakePeripheralEndpoint(NullPeripheralEndpoint):
     ) -> None:
         self.sent.append((target_addresses, exclude_addresses or set(), data))
 
+    def subscriber_count(self) -> int:
+        return 0
+
 
 def _make_transport(
     *,
@@ -937,6 +940,23 @@ def test_background_scan_off_duration_extends_when_idle() -> None:
     assert off_duration == 60.0
 
 
+def test_background_scan_stays_continuous_during_discovery_grace() -> None:
+    transport = BLEChatTransport(
+        identity=Identity.generate(),
+        nickname="local",
+        system_log=lambda *_args: None,
+        message_log=lambda *_args: None,
+        background_mode=True,
+        scan_interval=5.0,
+    )
+    transport._last_mesh_activity_at = 0.0
+
+    on_duration, off_duration = transport._background_scan_durations(now_monotonic=15.0)
+
+    assert on_duration == 5.0
+    assert off_duration == 0.0
+
+
 def test_background_scan_off_duration_extends_with_live_peers() -> None:
     transport = BLEChatTransport(
         identity=Identity.generate(),
@@ -948,6 +968,24 @@ def test_background_scan_off_duration_extends_with_live_peers() -> None:
     )
     transport.clients = {"A1": "A1"}  # type: ignore[assignment]
 
+    _on_duration, off_duration = transport._background_scan_durations(now_monotonic=10.0)
+
+    assert off_duration == 30.0
+
+
+def test_background_scan_off_duration_extends_with_peripheral_subscribers() -> None:
+    endpoint = FakePeripheralEndpoint()
+    transport = BLEChatTransport(
+        identity=Identity.generate(),
+        nickname="local",
+        system_log=lambda *_args: None,
+        message_log=lambda *_args: None,
+        background_mode=True,
+        scan_interval=5.0,
+        peripheral_endpoint=endpoint,
+    )
+
+    endpoint.subscriber_count = lambda: 1  # type: ignore[method-assign]
     _on_duration, off_duration = transport._background_scan_durations(now_monotonic=10.0)
 
     assert off_duration == 30.0
