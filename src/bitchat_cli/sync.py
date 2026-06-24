@@ -48,6 +48,12 @@ class SyncTypeFlags:
         bit = self._TYPE_TO_BIT.get(SyncMessageType(message_type))
         return bit is not None and bool(self.raw_value & (1 << bit))
 
+    def intersect(self, other: "SyncTypeFlags") -> "SyncTypeFlags":
+        return SyncTypeFlags(self.raw_value & other.raw_value)
+
+    def is_empty(self) -> bool:
+        return self.raw_value == 0
+
     def to_bytes(self) -> bytes | None:
         if self.raw_value == 0:
             return None

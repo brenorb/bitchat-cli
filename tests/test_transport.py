@@ -976,6 +976,38 @@ def test_request_sync_returns_missing_public_packets() -> None:
     asyncio.run(case())
 
 
+def test_send_request_sync_filters_unsupported_file_transfer_type() -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        alice_identity = Identity.generate()
+        transport = _make_transport(
+            identity=local_identity,
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+        )
+        _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="A1")
+        transport.clients = {"A1": "A1"}  # type: ignore[assignment]
+
+        sent_packets: list[tuple[str, Packet]] = []
+
+        async def fake_send(peer_id: str, packet: Packet) -> bool:
+            sent_packets.append((peer_id, packet))
+            return True
+
+        transport._send_packet_to_peer = fake_send  # type: ignore[method-assign]
+
+        requested = SyncTypeFlags.from_message_types([MessageType.MESSAGE, MessageType.FILE_TRANSFER])
+        assert await transport.send_request_sync(alice_identity.peer_id, types=requested) is True
+
+        decoded = RequestSyncPacket.decode(sent_packets[0][1].payload)
+
+        assert decoded is not None
+        assert decoded.types == SyncTypeFlags.from_message_types([MessageType.MESSAGE])
+
+    asyncio.run(case())
+
+
 def test_request_sync_filter_suppresses_known_public_packets() -> None:
     async def case() -> None:
         local_identity = Identity.generate()
@@ -1011,6 +1043,55 @@ def test_request_sync_filter_suppresses_known_public_packets() -> None:
             m=m,
             data=data,
             types=SyncTypeFlags.from_message_types([MessageType.MESSAGE]),
+        )
+        request_packet = Packet(
+            packet_type=MessageType.REQUEST_SYNC,
+            sender_id=bytes.fromhex(alice_identity.peer_id),
+            recipient_id=bytes.fromhex(local_identity.peer_id),
+            payload=request.encode(),
+            ttl=0,
+        ).sign(alice_identity)
+
+        await transport._handle_decoded_packet("A1", request_packet)
+
+        assert sent_packets == []
+
+    asyncio.run(case())
+
+
+def test_request_sync_ignores_unsupported_file_transfer_type() -> None:
+    async def case() -> None:
+        local_identity = Identity.generate()
+        alice_identity = Identity.generate()
+        bob_identity = Identity.generate()
+        transport = _make_transport(
+            identity=local_identity,
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+        )
+        _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="A1")
+        _register_known_peer(transport, peer_identity=bob_identity, nickname="bob", address="B1")
+        transport.clients = {"A1": "A1", "B1": "B1"}  # type: ignore[assignment]
+
+        sent_packets: list[tuple[str, Packet]] = []
+
+        async def fake_send(peer_id: str, packet: Packet) -> bool:
+            sent_packets.append((peer_id, packet))
+            return True
+
+        transport._send_packet_to_peer = fake_send  # type: ignore[method-assign]
+
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        message = make_public_message_packet(bob_identity, "hello mesh", timestamp_ms=now_ms)
+        await transport._handle_decoded_packet("B1", message)
+        sent_packets.clear()
+
+        request = RequestSyncPacket(
+            p=4,
+            m=1,
+            data=b"",
+            types=SyncTypeFlags.from_message_types([MessageType.FILE_TRANSFER]),
         )
         request_packet = Packet(
             packet_type=MessageType.REQUEST_SYNC,

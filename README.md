@@ -94,6 +94,8 @@ Behavior notes:
   answer `REQUEST_SYNC` packets with cached announces, public messages, and
   oversized-packet fragments, marking solicited replay packets with the
   official `RSR` wire flag.
+- Unsupported sync types such as file transfer are filtered out locally until
+  the CLI grows the matching feature surface.
 - The CLI validates `RSR` catch-up packets against the peer that answered the
   sync request, including replayed public messages originally authored by this
   device.

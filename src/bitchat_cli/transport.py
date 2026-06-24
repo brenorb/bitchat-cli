@@ -50,6 +50,9 @@ _MAX_FUTURE_TIMESTAMP_SKEW_SECONDS = 120.0
 _MAX_BROADCAST_PACKET_AGE_SECONDS = 900.0
 _SYNC_PUBLIC_MESSAGE_CAPACITY = 256
 _SYNC_FRAGMENT_CAPACITY = 512
+_SUPPORTED_SYNC_TYPES = SyncTypeFlags.from_message_types(
+    [MessageType.ANNOUNCE, MessageType.MESSAGE, MessageType.FRAGMENT]
+)
 _BACKGROUND_CONNECTED_SCAN_OFF_SECONDS = 30.0
 _BACKGROUND_IDLE_SCAN_OFF_SECONDS = 60.0
 _BACKGROUND_IDLE_THRESHOLD_SECONDS = 60.0
@@ -233,9 +236,12 @@ class BLEChatTransport:
     ) -> bool:
         if peer_id not in self.known_peers:
             raise ValueError(f"unknown peer_id: {peer_id}")
-        ids = self._sync_candidate_ids(types)
+        supported_types = self._supported_sync_types(types)
+        if supported_types.is_empty():
+            return False
+        ids = self._sync_candidate_ids(supported_types)
         p, m, data = GCSFilter.build_filter(ids=ids, max_bytes=128, target_fpr=0.01)
-        request = RequestSyncPacket(p=p, m=m, data=data, types=types)
+        request = RequestSyncPacket(p=p, m=m, data=data, types=supported_types)
         self._request_sync_manager.register_request(peer_id)
         packet = Packet(
             packet_type=MessageType.REQUEST_SYNC,
@@ -577,6 +583,9 @@ class BLEChatTransport:
             direct_neighbors=direct_neighbors,
         )
 
+    def _supported_sync_types(self, types: SyncTypeFlags) -> SyncTypeFlags:
+        return types.intersect(_SUPPORTED_SYNC_TYPES)
+
     def _peer_for_address(self, address: str) -> PeerRecord | None:
         for peer in self.known_peers.values():
             if peer.active_address == address:
@@ -677,7 +686,9 @@ class BLEChatTransport:
             return
 
         sorted_values = GCSFilter.decode_to_sorted_set(p=request.p, m=request.m, data=request.data)
-        requested_types = request.types or SyncTypeFlags.PUBLIC_MESSAGES
+        requested_types = self._supported_sync_types(request.types or SyncTypeFlags.PUBLIC_MESSAGES)
+        if requested_types.is_empty():
+            return
         responses = self._sync_response_candidates(requested_types)
         for cached_packet in responses:
             packet_id = packet_sync_id(cached_packet)
