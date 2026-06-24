@@ -38,6 +38,8 @@ PrivateMessageLogger = Callable[[str, str, datetime, str, str], None]
 ReceiptLogger = Callable[[str, str, str, datetime], None]
 
 _MAX_PENDING_NOISE_PAYLOADS_PER_PEER = 32
+_MAX_NOTIFICATION_QUEUE_SIZE = 256
+_NOTIFICATION_WORKER_COUNT = 1
 
 
 @dataclass(slots=True)
@@ -85,12 +87,19 @@ class BLEChatTransport:
         self._fragment_buffer = FragmentAssemblyBuffer()
         self._reconnect_ready_at: dict[str, float] = {}
         self._scan_task: asyncio.Task[None] | None = None
+        self._notification_queue: asyncio.Queue[tuple[str, bytes]] | None = None
+        self._notification_workers: list[asyncio.Task[None]] = []
         self._scanner: BleakScanner | None = None
         self._scanner_running = False
         self._stop_event = asyncio.Event()
 
     async def start(self) -> None:
         self._stop_event.clear()
+        self._notification_queue = asyncio.Queue(maxsize=_MAX_NOTIFICATION_QUEUE_SIZE)
+        self._notification_workers = [
+            asyncio.create_task(self._notification_worker())
+            for _ in range(_NOTIFICATION_WORKER_COUNT)
+        ]
         self._scanner = BleakScanner(
             detection_callback=self._handle_discovered_device,
             service_uuids=[SERVICE_UUID],
@@ -109,6 +118,16 @@ class BLEChatTransport:
                 await self._scan_task
             except asyncio.CancelledError:
                 pass
+        notification_workers = list(self._notification_workers)
+        self._notification_workers.clear()
+        for worker in notification_workers:
+            worker.cancel()
+        for worker in notification_workers:
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
+        self._notification_queue = None
         await self._set_scanning(False)
         try:
             await self._broadcast_packet(make_leave_packet(self.identity))
@@ -253,7 +272,7 @@ class BLEChatTransport:
                 raise RuntimeError("peer missing BitChat characteristic")
             await client.start_notify(
                 CHARACTERISTIC_UUID,
-                lambda _sender, data, addr=address: asyncio.create_task(self._handle_notification(addr, bytes(data))),
+                lambda _sender, data, addr=address: self._enqueue_notification(addr, bytes(data)),
             )
             self.clients[address] = client
             self.system_log(f"Connected to BitChat peer at {address}.")
@@ -281,6 +300,25 @@ class BLEChatTransport:
             return
 
         await self._handle_decoded_packet(address, packet)
+
+    def _enqueue_notification(self, address: str, data: bytes) -> None:
+        if self._notification_queue is None:
+            asyncio.create_task(self._handle_notification(address, data))
+            return
+        try:
+            self._notification_queue.put_nowait((address, data))
+        except asyncio.QueueFull:
+            self.system_log(f"Dropped inbound packet from {address}: notification queue is full.")
+
+    async def _notification_worker(self) -> None:
+        if self._notification_queue is None:
+            return
+        while True:
+            address, data = await self._notification_queue.get()
+            try:
+                await self._handle_notification(address, data)
+            finally:
+                self._notification_queue.task_done()
 
     async def _handle_decoded_packet(self, address: str, packet: Packet) -> None:
         packet_key = packet_cache_key(packet)

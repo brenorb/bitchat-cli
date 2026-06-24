@@ -441,3 +441,56 @@ def test_direct_send_prefers_one_active_address_per_peer() -> None:
         assert writes == [("B2", writes[0][1])]
 
     asyncio.run(case())
+
+
+def test_notification_worker_drains_enqueued_packets() -> None:
+    async def case() -> None:
+        transport = _make_transport(
+            identity=Identity.generate(),
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+        )
+        seen: list[tuple[str, bytes]] = []
+
+        async def fake_handle(address: str, data: bytes) -> None:
+            seen.append((address, data))
+
+        transport._handle_notification = fake_handle  # type: ignore[method-assign]
+        transport._notification_queue = asyncio.Queue(maxsize=2)
+        worker = asyncio.create_task(transport._notification_worker())
+
+        transport._enqueue_notification("A1", b"one")
+        transport._enqueue_notification("A1", b"two")
+        await asyncio.wait_for(transport._notification_queue.join(), timeout=1.0)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        assert seen == [("A1", b"one"), ("A1", b"two")]
+
+    asyncio.run(case())
+
+
+def test_notification_enqueue_drops_when_queue_is_full() -> None:
+    async def case() -> None:
+        logs: list[str] = []
+        transport = BLEChatTransport(
+            identity=Identity.generate(),
+            nickname="local",
+            system_log=logs.append,
+            message_log=lambda *_args: None,
+        )
+        transport._notification_queue = asyncio.Queue(maxsize=1)
+        transport._enqueue_notification("A1", b"one")
+        transport._enqueue_notification("A1", b"two")
+
+        queued = await transport._notification_queue.get()
+        transport._notification_queue.task_done()
+
+        assert queued == ("A1", b"one")
+        assert "Dropped inbound packet" in logs[0]
+
+    asyncio.run(case())

@@ -76,6 +76,8 @@ Behavior notes:
   suppression.
 - Direct DM traffic uses one active BLE link per peer instead of writing the
   same packet to every historical address we have seen for that peer.
+- The daemon now processes inbound BLE notifications through a bounded worker
+  queue instead of spawning an unbounded task per packet.
 - Private messages are persisted separately from the public inbox and exposed
   through `bitchat dm inbox` and `bitchat dm history`.
 - Only one CLI BLE session can own the radio at a time, so `chat` and `daemon`
