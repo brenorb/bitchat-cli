@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.11"
 
 [options]
-exclude-newer = "2026-06-17T15:26:38.402293Z"
+exclude-newer = "2026-06-23T01:48:15.159459Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
@@ -23,7 +23,7 @@ wheels = [
 ]
 
 [[package]]
-name = "bitchat-cli"
+name = "bitchat4agents"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

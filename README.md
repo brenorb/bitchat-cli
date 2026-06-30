@@ -43,6 +43,15 @@ uv run bitchat doctor
 uv run bitchat chat --nickname breno
 ```
 
+## Global install
+
+Install the published package with `uv`, then invoke it directly as `bitchat`:
+
+```bash
+uv tool install bitchat4agents
+bitchat doctor
+```
+
 Inside chat:
 
 - `/help`
