@@ -90,6 +90,48 @@ def test_geo_lookup_parser_routes_to_geo_lookup_handler() -> None:
     assert args.limit == 3
 
 
+def test_geo_channel_set_parser_routes_to_handler() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["geo", "channel", "set", "#u4pruy", "--name", "Home", "--bookmark"])
+
+    assert args.handler is app.run_geo_channel_set
+    assert args.geohash == "#u4pruy"
+    assert args.name == "Home"
+    assert args.bookmark is True
+
+
+def test_geo_notes_list_parser_routes_to_handler() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["geo", "notes", "list", "#u4pruydqq", "--limit", "5", "--json"])
+
+    assert args.handler is app.run_geo_notes_list
+    assert args.geohash == "#u4pruydqq"
+    assert args.limit == 5
+    assert args.json is True
+
+
+def test_geo_dm_send_parser_routes_to_handler() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["geo", "dm", "send", "#u4pruy", "@bubbles", "hello geo dm"])
+
+    assert args.handler is app.run_geo_dm_send
+    assert args.geohash == "#u4pruy"
+    assert args.target == "@bubbles"
+    assert args.message == "hello geo dm"
+
+
+def test_geo_participant_block_parser_routes_to_handler() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["geo", "participant", "block", "#u4pruy", "deadbeef" * 8])
+
+    assert args.handler is app.run_geo_participant_block
+    assert args.target == "deadbeef" * 8
+
+
 def test_social_link_parser_routes_to_social_link_handler() -> None:
     parser = cli.build_parser()
 
@@ -100,6 +142,16 @@ def test_social_link_parser_routes_to_social_link_handler() -> None:
     assert args.npub == "npub1test"
 
 
+def test_social_verify_parser_routes_to_handler() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["social", "verify", "@bubbles", "--payload", "bitchat://verify?v=1"])
+
+    assert args.handler is app.run_social_verify
+    assert args.target == "@bubbles"
+    assert args.payload == "bitchat://verify?v=1"
+
+
 def test_network_proxy_set_parser_routes_to_proxy_set_handler() -> None:
     parser = cli.build_parser()
 
@@ -108,3 +160,14 @@ def test_network_proxy_set_parser_routes_to_proxy_set_handler() -> None:
     assert args.handler is app.run_network_proxy_set
     assert args.target == "tor"
     assert args.policy == "require"
+
+
+def test_topic_join_parser_routes_to_handler() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["topic", "join", "btc", "--password", "secret", "--retain"])
+
+    assert args.handler is app.run_topic_join
+    assert args.channel == "btc"
+    assert args.password == "secret"
+    assert args.retain is True

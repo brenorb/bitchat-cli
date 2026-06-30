@@ -18,8 +18,18 @@ from .app import (
     run_geo_levels,
     run_geo_lookup,
     run_geo_decode,
+    run_geo_dm_history,
+    run_geo_dm_send,
     run_geo_encode,
     run_geo_send,
+    run_geo_channel_list,
+    run_geo_channel_set,
+    run_geo_channel_show,
+    run_geo_notes_add,
+    run_geo_notes_list,
+    run_geo_participant_block,
+    run_geo_participant_show,
+    run_geo_participant_unblock,
     run_geo_who,
     run_geo_watch_add,
     run_geo_watch_list,
@@ -33,14 +43,21 @@ from .app import (
     run_social_fingerprint,
     run_social_link,
     run_social_list,
+    run_social_unverify,
     run_social_unblock,
     run_social_unfavorite,
     run_social_unlink,
+    run_social_verify,
     run_network_proxy_disable,
     run_network_proxy_set,
     run_network_proxy_status,
     run_network_proxy_test,
     run_selftest,
+    run_topic_join,
+    run_topic_leave,
+    run_topic_list,
+    run_topic_password_set,
+    run_topic_retain,
 )
 
 
@@ -160,6 +177,79 @@ def build_parser() -> argparse.ArgumentParser:
     geo_lookup.add_argument("--json", action="store_true", help="Output JSON")
     geo_lookup.set_defaults(handler=run_geo_lookup)
 
+    geo_channel = geo_subparsers.add_parser("channel", help="Manage saved geohash channel metadata")
+    geo_channel_subparsers = geo_channel.add_subparsers(dest="geo_channel_command", required=True)
+
+    geo_channel_set = geo_channel_subparsers.add_parser("set", help="Save local metadata for a geohash")
+    geo_channel_set.add_argument("geohash", help="Target geohash, with or without leading #")
+    geo_channel_set.add_argument("--name", help="Friendly display name")
+    geo_channel_set.add_argument("--note", help="Private local note for this geohash")
+    geo_channel_set.add_argument("--bookmark", action="store_true", help="Bookmark the geohash")
+    geo_channel_set.add_argument("--unbookmark", action="store_true", help="Remove bookmark state")
+    geo_channel_set.add_argument("--select", action="store_true", help="Mark this as the selected geohash context")
+    geo_channel_set.add_argument("--unselect", action="store_true", help="Clear selected state")
+    geo_channel_set.add_argument("--teleport", action="store_true", help="Mark the saved context as teleported")
+    geo_channel_set.add_argument("--no-teleport", action="store_true", help="Clear saved teleport state")
+    geo_channel_set.set_defaults(handler=run_geo_channel_set)
+
+    geo_channel_show = geo_channel_subparsers.add_parser("show", help="Show saved metadata and recent activity for one geohash")
+    geo_channel_show.add_argument("geohash", help="Target geohash, with or without leading #")
+    geo_channel_show.add_argument("--json", action="store_true", help="Output JSON")
+    geo_channel_show.set_defaults(handler=run_geo_channel_show)
+
+    geo_channel_list = geo_channel_subparsers.add_parser("list", help="List saved geohash channel metadata")
+    geo_channel_list.add_argument("--bookmarked", action="store_true", help="Show only bookmarked geohashes")
+    geo_channel_list.add_argument("--json", action="store_true", help="Output JSON")
+    geo_channel_list.set_defaults(handler=run_geo_channel_list)
+
+    geo_notes = geo_subparsers.add_parser("notes", help="Publish and inspect persistent location notes")
+    geo_notes_subparsers = geo_notes.add_subparsers(dest="geo_notes_command", required=True)
+
+    geo_notes_add = geo_notes_subparsers.add_parser("add", help="Publish a location note for one building geohash")
+    geo_notes_add.add_argument("geohash", help="Building-level geohash, with or without leading #")
+    geo_notes_add.add_argument("message", help="Note body")
+    geo_notes_add.set_defaults(handler=run_geo_notes_add)
+
+    geo_notes_list = geo_notes_subparsers.add_parser("list", help="Fetch persistent location notes for one building geohash")
+    geo_notes_list.add_argument("geohash", help="Building-level geohash, with or without leading #")
+    geo_notes_list.add_argument("--json", action="store_true", help="Output JSON")
+    geo_notes_list.add_argument("--limit", type=int, default=50, help="Maximum notes to return")
+    geo_notes_list.set_defaults(handler=run_geo_notes_list)
+
+    geo_dm = geo_subparsers.add_parser("dm", help="Send and inspect geohash-scoped Nostr DMs")
+    geo_dm_subparsers = geo_dm.add_subparsers(dest="geo_dm_command", required=True)
+
+    geo_dm_send = geo_dm_subparsers.add_parser("send", help="Send a geohash-scoped Nostr DM")
+    geo_dm_send.add_argument("geohash", help="Source geohash, with or without leading #")
+    geo_dm_send.add_argument("target", help="Participant pubkey, npub, or @nickname")
+    geo_dm_send.add_argument("message", help="Message body")
+    geo_dm_send.set_defaults(handler=run_geo_dm_send)
+
+    geo_dm_history = geo_dm_subparsers.add_parser("history", help="Show geohash-scoped DM history for one participant")
+    geo_dm_history.add_argument("geohash", help="Source geohash, with or without leading #")
+    geo_dm_history.add_argument("target", help="Participant pubkey, npub, or @nickname")
+    geo_dm_history.add_argument("--json", action="store_true", help="Output JSON")
+    geo_dm_history.add_argument("--tail", type=int, help="Show only the last N rows")
+    geo_dm_history.set_defaults(handler=run_geo_dm_history)
+
+    geo_participant = geo_subparsers.add_parser("participant", help="Inspect and moderate geohash participants")
+    geo_participant_subparsers = geo_participant.add_subparsers(dest="geo_participant_command", required=True)
+
+    geo_participant_show = geo_participant_subparsers.add_parser("show", help="Show saved trust state for one participant")
+    geo_participant_show.add_argument("geohash", help="Observed geohash, with or without leading #")
+    geo_participant_show.add_argument("target", help="Participant pubkey, npub, or @nickname")
+    geo_participant_show.set_defaults(handler=run_geo_participant_show)
+
+    geo_participant_block = geo_participant_subparsers.add_parser("block", help="Block a geohash participant by Nostr identity")
+    geo_participant_block.add_argument("geohash", help="Observed geohash, with or without leading #")
+    geo_participant_block.add_argument("target", help="Participant pubkey, npub, or @nickname")
+    geo_participant_block.set_defaults(handler=run_geo_participant_block)
+
+    geo_participant_unblock = geo_participant_subparsers.add_parser("unblock", help="Unblock a geohash participant by Nostr identity")
+    geo_participant_unblock.add_argument("geohash", help="Observed geohash, with or without leading #")
+    geo_participant_unblock.add_argument("target", help="Participant pubkey, npub, or @nickname")
+    geo_participant_unblock.set_defaults(handler=run_geo_participant_unblock)
+
     geo_watch = geo_subparsers.add_parser("watch", help="Manage background geohash subscriptions")
     geo_watch_subparsers = geo_watch.add_subparsers(dest="geo_watch_command", required=True)
 
@@ -216,6 +306,15 @@ def build_parser() -> argparse.ArgumentParser:
     social_fingerprint.add_argument("target", help="Peer ID or @nickname")
     social_fingerprint.set_defaults(handler=run_social_fingerprint)
 
+    social_verify = social_subparsers.add_parser("verify", help="Mark a peer as verified")
+    social_verify.add_argument("target", help="Peer ID, pubkey, or @nickname")
+    social_verify.add_argument("--payload", help="Verification QR payload to validate before marking verified")
+    social_verify.set_defaults(handler=run_social_verify)
+
+    social_unverify = social_subparsers.add_parser("unverify", help="Clear verified state for a peer")
+    social_unverify.add_argument("target", help="Peer ID, pubkey, or @nickname")
+    social_unverify.set_defaults(handler=run_social_unverify)
+
     network = subparsers.add_parser("network", help="Manage privacy policy and network proxy behavior")
     network_subparsers = network.add_subparsers(dest="network_command", required=True)
 
@@ -261,6 +360,33 @@ def build_parser() -> argparse.ArgumentParser:
     dm_send_file.add_argument("target", help="Peer ID or @nickname")
     dm_send_file.add_argument("path", help="Path to a local file")
     dm_send_file.set_defaults(handler=run_dm_send_file)
+
+    topic = subparsers.add_parser("topic", help="Manage Android-style named topic channels locally")
+    topic_subparsers = topic.add_subparsers(dest="topic_command", required=True)
+
+    topic_join = topic_subparsers.add_parser("join", help="Join or create a local named topic channel")
+    topic_join.add_argument("channel", help="Channel name, with or without leading #")
+    topic_join.add_argument("--password", help="Optional password marker for the topic")
+    topic_join.add_argument("--retain", action="store_true", help="Enable local retention for the topic")
+    topic_join.set_defaults(handler=run_topic_join)
+
+    topic_leave = topic_subparsers.add_parser("leave", help="Leave a local named topic channel")
+    topic_leave.add_argument("channel", help="Channel name, with or without leading #")
+    topic_leave.set_defaults(handler=run_topic_leave)
+
+    topic_list = topic_subparsers.add_parser("list", help="List locally configured topic channels")
+    topic_list.add_argument("--json", action="store_true", help="Output JSON")
+    topic_list.set_defaults(handler=run_topic_list)
+
+    topic_password = topic_subparsers.add_parser("password", help="Set or clear a stored topic password")
+    topic_password.add_argument("channel", help="Channel name, with or without leading #")
+    topic_password.add_argument("password", nargs="?", help="Password to store; omit to clear")
+    topic_password.set_defaults(handler=run_topic_password_set)
+
+    topic_retain = topic_subparsers.add_parser("retain", help="Enable or disable local retention for a topic")
+    topic_retain.add_argument("channel", help="Channel name, with or without leading #")
+    topic_retain.add_argument("enabled", choices=["on", "off"])
+    topic_retain.set_defaults(handler=run_topic_retain)
 
     selftest = subparsers.add_parser("selftest", help="Run offline protocol checks")
     selftest.set_defaults(handler=run_selftest)

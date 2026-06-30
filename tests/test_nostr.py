@@ -7,6 +7,7 @@ from bitchat_cli.nostr import (
     decode_npub,
     decrypt_private_message,
     encode_bitchat_private_message,
+    encode_bitchat_private_message_no_recipient,
 )
 
 
@@ -56,3 +57,19 @@ def test_private_message_event_encrypts_and_decrypts() -> None:
     assert content == embedded
     assert sender_pubkey_hex == sender.public_key_hex
     assert timestamp > 0
+
+
+def test_embedded_bitchat_private_message_without_recipient_round_trip() -> None:
+    encoded = encode_bitchat_private_message_no_recipient(
+        sender_peer_id="1122334455667788",
+        message_id="m-geo-1",
+        content="hello geo fallback",
+    )
+
+    decoded = decode_bitchat_payload(encoded)
+
+    assert decoded.peer_id == ""
+    assert decoded.sender_peer_id == "1122334455667788"
+    assert decoded.message_kind == "private_message"
+    assert decoded.message_id == "m-geo-1"
+    assert decoded.content == "hello geo fallback"

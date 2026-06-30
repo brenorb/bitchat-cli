@@ -91,6 +91,16 @@ class DaemonClient:
             }
         )
 
+    def send_geo_dm(self, *, geohash: str, peer_pubkey: str, content: str) -> dict[str, object]:
+        return self.send_command(
+            {
+                "command": "geo_dm_send",
+                "geohash": geohash,
+                "peer_pubkey": peer_pubkey,
+                "content": content,
+            }
+        )
+
     def set_geo_watches(self, geohashes: list[str]) -> dict[str, object]:
         return self.send_command({"command": "geo_watch_set", "geohashes": geohashes})
 

@@ -43,9 +43,19 @@ def resolve_social_record(records: list[dict[str, object]], raw_target: str) -> 
     target = raw_target.strip()
     if target.startswith("@"):
         target = target[1:]
+    normalized_target = target.lower()
     direct_match = [record for record in records if record.get("peer_id") == target]
     if direct_match:
         return direct_match[0]
+    pubkey_match = [
+        record
+        for record in records
+        if str(record.get("nostr_pubkey_hex") or "").lower() == normalized_target
+    ]
+    if len(pubkey_match) == 1:
+        return pubkey_match[0]
+    if len(pubkey_match) > 1:
+        raise ValueError(f"ambiguous Nostr pubkey: {raw_target}")
     nickname_match = [record for record in records if record.get("nickname") == target]
     if len(nickname_match) == 1:
         return nickname_match[0]
@@ -343,6 +353,15 @@ def run_geo_who(
         self_pubkey=derive_nostr_identity(bytes.fromhex(state.nostr_device_seed_hex), geohash).public_key_hex,
         now=now_factory(),
     )
+    social_index = {
+        str(row.get("nostr_pubkey_hex") or row.get("peer_id") or "").lower(): row
+        for row in social_store(runtime).read_all()
+    }
+    for row in participants:
+        social_row = social_index.get(str(row.get("peer_id") or "").lower(), {})
+        row["favorite"] = bool(social_row.get("favorite"))
+        row["blocked"] = bool(social_row.get("blocked"))
+        row["verified"] = bool(social_row.get("verified_at"))
     if args.json:
         print(json.dumps(participants, indent=2))
         return 0
@@ -351,7 +370,16 @@ def run_geo_who(
         return 0
     print(f"#{geohash} participants")
     for row in participants:
-        suffix = " teleport" if row.get("teleported") else ""
+        flags: list[str] = []
+        if row.get("teleported"):
+            flags.append("teleport")
+        if row.get("favorite"):
+            flags.append("favorite")
+        if row.get("blocked"):
+            flags.append("blocked")
+        if row.get("verified"):
+            flags.append("verified")
+        suffix = f" [{' '.join(flags)}]" if flags else ""
         print(f"{row['sender']:20} {row['last_seen']}{suffix}")
     return 0
 
@@ -365,6 +393,10 @@ def run_dm_inbox(
     peer_rows = PeerStore(runtime.peers_path).read_all()
     social_rows = social_store(runtime).read_all()
     peer_index = {row["peer_id"]: row for row in peer_rows}
+    verified_index = {
+        str(row.get("peer_id") or ""): bool(row.get("verified_at"))
+        for row in social_rows
+    }
     for row in social_rows:
         peer_index.setdefault(str(row["peer_id"]), row)
     conversations: dict[str, dict[str, object]] = {}
@@ -380,6 +412,7 @@ def run_dm_inbox(
                 "nickname": peer_index.get(str(conversation_id), {}).get("nickname", str(conversation_id)[:8]),
                 "last_timestamp": "",
                 "last_preview": "",
+                "verified": verified_index.get(str(conversation_id), False),
             },
         )
         timestamp = str(row.get("timestamp") or "")
@@ -405,5 +438,6 @@ def run_dm_inbox(
         print("no direct-message conversations recorded")
         return 0
     for row in rows:
-        print(f"{row['nickname']:16} {row['peer_id']}  {row['last_timestamp']}  {row['last_preview']}")
+        suffix = " [verified]" if row.get("verified") else ""
+        print(f"{row['nickname']:16} {row['peer_id']}  {row['last_timestamp']}  {row['last_preview']}{suffix}")
     return 0

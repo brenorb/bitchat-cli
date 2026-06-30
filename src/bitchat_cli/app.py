@@ -16,6 +16,7 @@ from .daemon_client import DaemonClient
 from .files import load_outgoing_file
 from .geochat import (
     GeoChatDaemon,
+    derive_nostr_identity,
     event_committed_pow_difficulty,
     event_display_name,
     event_geohash,
@@ -23,6 +24,7 @@ from .geochat import (
     event_pow_difficulty,
     normalize_geohash,
 )
+from .location_notes import fetch_location_notes, publish_location_note
 from .network import (
     NetworkConfig,
     first_live_tor_proxy,
@@ -45,6 +47,7 @@ from .queries import (
 from .social import SocialStore
 from .state import ActiveSessionLease, MessageStore, PeerStore, RuntimePaths, StateStore, pid_is_running
 from .transport import BLEChatTransport
+from .verification import VerificationPayload, build_verification_payload, verify_verification_payload
 
 _PERIPHERAL_SUBSCRIBE_ANNOUNCE_DELAY_SECONDS = 0.4
 _MESH_CONVERSATION_ID = "mesh"
@@ -96,6 +99,119 @@ def _resolve_nostr_identity(state) -> NostrIdentity:
     return NostrIdentity.from_private_key_hex(state.nostr_private_key_hex)
 
 
+def _normalize_topic_channel(raw: str) -> str:
+    name = raw.strip().lower()
+    if not name:
+        raise ValueError("invalid topic channel")
+    if not name.startswith("#"):
+        name = f"#{name}"
+    return name
+
+
+def _selected_geohash_context(state) -> tuple[str | None, dict[str, object] | None]:
+    for geohash, row in state.geohash_channels.items():
+        if bool(row.get("selected")):
+            return geohash, row
+    return None, None
+
+
+def _geo_channel_row(state, geohash: str) -> dict[str, object]:
+    return dict(state.geohash_channels.get(geohash, {}))
+
+
+def _geohash_watch_identities(state) -> list[tuple[str, NostrIdentity]]:
+    identities: list[tuple[str, NostrIdentity]] = []
+    seen: set[str] = set()
+    for geohash in state.watched_geohashes:
+        normalized = normalize_geohash(geohash)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        identities.append(
+            (
+                normalized,
+                NostrIdentity.from_private_key_hex(
+                    derive_nostr_identity(bytes.fromhex(state.nostr_device_seed_hex), normalized).private_key_hex
+                ),
+            )
+        )
+    selected_geohash, _ = _selected_geohash_context(state)
+    if selected_geohash and selected_geohash not in seen:
+        identities.append(
+            (
+                selected_geohash,
+                NostrIdentity.from_private_key_hex(
+                    derive_nostr_identity(bytes.fromhex(state.nostr_device_seed_hex), selected_geohash).private_key_hex
+                ),
+            )
+        )
+    return identities
+
+
+def _resolve_geo_participant_target(runtime: RuntimePaths, raw_target: str) -> dict[str, object]:
+    social_rows = _social_store(runtime).read_all()
+    try:
+        return _resolve_social_record(social_rows, raw_target)
+    except ValueError:
+        target = raw_target.strip()
+        if target.startswith("@"):
+            target = target[1:]
+        try:
+            pubkey = decode_npub(target)
+        except Exception:
+            pubkey = target.lower()
+        if len(pubkey) == 64:
+            return {
+                "peer_id": pubkey,
+                "nickname": f"anon#{pubkey[-4:]}",
+                "nostr_pubkey_hex": pubkey,
+            }
+        raise
+
+
+def _ensure_geo_participant_record(
+    runtime: RuntimePaths,
+    *,
+    geohash: str,
+    target: str,
+    allow_unseen: bool = False,
+) -> dict[str, object]:
+    try:
+        record = _resolve_geo_participant_target(runtime, target)
+        if str(record.get("nostr_pubkey_hex") or "").lower() == str(record.get("peer_id") or "").lower():
+            return record
+        return record
+    except ValueError:
+        pass
+    normalized_geohash = normalize_geohash(geohash)
+    rows = MessageStore(runtime.inbox_path).read_all(deduplicate=True)
+    social = _social_store(runtime)
+    stripped_target = target[1:] if target.startswith("@") else target
+    lowered = stripped_target.lower()
+    for row in rows:
+        if str(row.get("conversation_id") or "") != normalized_geohash:
+            continue
+        pubkey = str(row.get("peer_id") or "").lower()
+        sender = str(row.get("sender") or "")
+        if lowered not in {pubkey, sender.lower()}:
+            continue
+        record = social.upsert(
+            peer_id=pubkey,
+            nickname=sender or f"anon#{pubkey[-4:]}",
+            nostr_pubkey_hex=pubkey,
+        )
+        return record
+    if allow_unseen:
+        if len(lowered) != 64:
+            raise ValueError(f"unknown participant: {target}")
+        return social.upsert(
+            peer_id=lowered,
+            nickname=f"anon#{lowered[-4:]}",
+            nostr_pubkey_hex=lowered,
+        )
+    raise ValueError(f"unknown participant: {target}")
+
+
 def _peer_has_live_ble_link(transport: BLEChatTransport, peer_id: str) -> bool:
     peer = transport.known_peers.get(peer_id)
     if peer is None:
@@ -127,6 +243,7 @@ def _record_geohash_event(
     *,
     message_store: MessageStore,
     log_handle,
+    social_store: SocialStore | None = None,
 ) -> None:
     geohash = event_geohash(event)
     if geohash is None:
@@ -137,12 +254,22 @@ def _record_geohash_event(
     content = str(event.get("content") or "").strip()
     kind = int(event.get("kind") or 0)
     message_kind = "geohash_presence" if kind == 20001 else "geohash_message"
+    pubkey = str(event.get("pubkey") or "").lower()
+    if social_store is not None:
+        existing = social_store.get_by_pubkey(pubkey)
+        if existing is not None and bool(existing.get("blocked")):
+            return
+        social_store.upsert(
+            peer_id=pubkey,
+            nickname=sender_name,
+            nostr_pubkey_hex=pubkey,
+        )
     message_store.append(
         direction="inbound",
         sender=sender_name,
         content=content,
         timestamp=timestamp,
-        peer_id=str(event.get("pubkey") or ""),
+        peer_id=pubkey,
         message_id=str(event.get("id") or ""),
         scope="public",
         conversation_id=geohash,
@@ -701,6 +828,7 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
         network_config = NetworkConfig.from_state(state)
     transport_ref: dict[str, BLEChatTransport] = {}
     nostr_identity = _resolve_nostr_identity(state)
+    geohash_watch_identities: dict[str, tuple[str, NostrIdentity]] = {}
 
     log_handle = runtime.daemon_log_path.open("a", encoding="utf-8")
     try:
@@ -833,7 +961,19 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
             )
 
         def daemon_geohash_message_log(event: dict[str, object]) -> None:
-            _record_geohash_event(event, message_store=message_store, log_handle=log_handle)
+            _record_geohash_event(
+                event,
+                message_store=message_store,
+                log_handle=log_handle,
+                social_store=social_store,
+            )
+
+        async def sync_geohash_dm_watchers() -> None:
+            geohash_watch_identities.clear()
+            identities = _geohash_watch_identities(state)
+            for geohash, identity in identities:
+                geohash_watch_identities[identity.public_key_hex] = (geohash, identity)
+            await nostr_client.set_extra_watch_identities([identity for _, identity in identities])
 
         def daemon_receipt_log(peer_id: str, receipt_type: str, message_id: str, timestamp: datetime) -> None:
             active_transport = transport_ref.get("value")
@@ -856,6 +996,67 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
             )
 
         def daemon_nostr_message_log(message) -> None:
+            geo_watch = geohash_watch_identities.get(message.recipient_pubkey_hex)
+            if geo_watch is not None and not message.peer_id:
+                geohash, geohash_identity = geo_watch
+                social_record = social_store.get_by_pubkey(message.sender_pubkey_hex)
+                if social_record is not None and bool(social_record.get("blocked")):
+                    return
+                nickname = (
+                    str(social_record.get("nickname") or "")
+                    if social_record is not None
+                    else f"anon#{message.sender_pubkey_hex[-4:]}"
+                )
+                if not nickname:
+                    nickname = f"anon#{message.sender_pubkey_hex[-4:]}"
+                social_store.upsert(
+                    peer_id=message.sender_pubkey_hex,
+                    nickname=nickname,
+                    nostr_pubkey_hex=message.sender_pubkey_hex,
+                )
+                timestamp = datetime.fromtimestamp(message.timestamp_ms / 1000, tz=timezone.utc)
+                conversation_id = f"{geohash}:{message.sender_pubkey_hex}"
+                if message.message_kind == "private_message":
+                    message_store.append(
+                        direction="inbound",
+                        sender=nickname,
+                        content=message.content,
+                        timestamp=timestamp,
+                        peer_id=message.sender_pubkey_hex,
+                        message_id=message.message_id,
+                        scope="geo_dm",
+                        conversation_id=conversation_id,
+                        message_kind="private_message",
+                        delivery_state="nostr_geohash",
+                    )
+                    print(
+                        f"{timestamp.astimezone(timezone.utc).isoformat()} [geo-dm #{geohash}] <{nickname}> {message.content}",
+                        file=log_handle,
+                        flush=True,
+                    )
+                    asyncio.create_task(
+                        nostr_client.send_geohash_receipt(
+                            sender_peer_id=state.identity.peer_id,
+                            sender_identity=geohash_identity,
+                            recipient_pubkey_hex=message.sender_pubkey_hex,
+                            receipt_type="delivered",
+                            message_id=message.message_id,
+                        )
+                    )
+                    return
+                message_store.append(
+                    direction="system",
+                    sender=nickname,
+                    content=message.content,
+                    timestamp=timestamp,
+                    peer_id=message.sender_pubkey_hex,
+                    message_id=message.message_id,
+                    scope="geo_dm",
+                    conversation_id=conversation_id,
+                    message_kind="receipt",
+                    delivery_state=message.content,
+                )
+                return
             social_record = social_store.get_by_pubkey(message.sender_pubkey_hex)
             if social_record is None or bool(social_record.get("blocked")):
                 return
@@ -926,7 +1127,23 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                         if _peer_has_live_ble_link(transport, peer_id):
                             message_id = await transport.send_private_message(peer_id, content)
                             delivery_state = "pending"
-                            response = {"ok": True, "message_id": message_id, "transport": "ble"}
+                            response = {
+                                "ok": True,
+                                "message_id": message_id,
+                                "transport": "ble",
+                                "route": "ble",
+                                "delivery_state": delivery_state,
+                            }
+                        elif peer_id in transport.known_peers:
+                            message_id = await transport.send_private_message(peer_id, content)
+                            delivery_state = "queued_offline"
+                            response = {
+                                "ok": True,
+                                "message_id": message_id,
+                                "transport": "ble",
+                                "route": "ble_outbox",
+                                "delivery_state": delivery_state,
+                            }
                         elif social_record is not None:
                             message_id = f"nostr-{int(time.time() * 1000)}"
                             await nostr_client.send_private_message(
@@ -937,7 +1154,13 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                                 content=content,
                             )
                             delivery_state = "nostr_fallback"
-                            response = {"ok": True, "message_id": message_id, "transport": "nostr"}
+                            response = {
+                                "ok": True,
+                                "message_id": message_id,
+                                "transport": "nostr",
+                                "route": "nostr",
+                                "delivery_state": delivery_state,
+                            }
                         else:
                             response = {"ok": False, "error": "no live BitChat link and no authorized Nostr fallback"}
                             message_id = ""
@@ -958,6 +1181,49 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                                 target_peer_id=peer_id,
                                 delivery_state=delivery_state,
                             )
+                elif command == "geo_dm_send":
+                    geohash = str(payload.get("geohash") or "")
+                    peer_pubkey = str(payload.get("peer_pubkey") or "").lower()
+                    content = str(payload.get("content") or "")
+                    if not geohash or not peer_pubkey or not content:
+                        response = {"ok": False, "error": "missing geohash, peer_pubkey, or content"}
+                    else:
+                        normalized_geohash = normalize_geohash(geohash)
+                        geohash_identity = NostrIdentity.from_private_key_hex(
+                            derive_nostr_identity(bytes.fromhex(state.nostr_device_seed_hex), normalized_geohash).private_key_hex
+                        )
+                        message_id = f"geo-dm-{int(time.time() * 1000)}"
+                        await nostr_client.send_geohash_private_message(
+                            sender_peer_id=state.identity.peer_id,
+                            sender_identity=geohash_identity,
+                            recipient_pubkey_hex=peer_pubkey,
+                            message_id=message_id,
+                            content=content,
+                        )
+                        message_store.append(
+                            direction="outbound",
+                            sender=state.nickname,
+                            content=content,
+                            timestamp=datetime.now(timezone.utc),
+                            peer_id=peer_pubkey,
+                            message_id=message_id,
+                            scope="geo_dm",
+                            conversation_id=f"{normalized_geohash}:{peer_pubkey}",
+                            message_kind="private_message",
+                            target_peer_id=peer_pubkey,
+                            delivery_state="nostr_geohash",
+                        )
+                        social_store.upsert(
+                            peer_id=peer_pubkey,
+                            nickname=f"anon#{peer_pubkey[-4:]}",
+                            nostr_pubkey_hex=peer_pubkey,
+                        )
+                        response = {
+                            "ok": True,
+                            "message_id": message_id,
+                            "transport": "nostr",
+                            "route": "nostr_geohash",
+                        }
                 elif command == "dm_send_file":
                     peer_id = str(payload.get("peer_id") or "")
                     raw_path = str(payload.get("path") or "")
@@ -1062,6 +1328,9 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                     raw_geohashes = payload.get("geohashes") or []
                     watched_geohashes = [str(item) for item in raw_geohashes if str(item)]
                     await geochat.set_watches(watched_geohashes)
+                    state.watched_geohashes = watched_geohashes
+                    store.save(state)
+                    await sync_geohash_dm_watchers()
                     response = {"ok": True, "geohashes": geochat.runtime_status()["watched_geohashes"]}
                 elif command == "dm_mark_read":
                     peer_id = str(payload.get("peer_id") or "")
@@ -1174,6 +1443,7 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
         daemon_log(f"Daemon starting with nickname={state.nickname} peer_id={state.identity.peer_id}.")
         await transport.start()
         await geochat.start(state.watched_geohashes)
+        await sync_geohash_dm_watchers()
         await nostr_client.start()
         await stop_event.wait()
         daemon_log("Daemon stopping.")
@@ -1455,15 +1725,25 @@ def run_geo_who(args: argparse.Namespace) -> int:
 def run_peers(args: argparse.Namespace) -> int:
     runtime = RuntimePaths()
     records = PeerStore(runtime.peers_path).read_all()
+    social_rows = _social_store(runtime).read_all()
+    verified_by_peer_id = {
+        str(row.get("peer_id") or ""): bool(row.get("verified_at"))
+        for row in social_rows
+    }
     if args.json:
-        print(json.dumps(records, indent=2))
+        enriched = [
+            dict(row, verified=verified_by_peer_id.get(str(row.get("peer_id") or ""), False))
+            for row in records
+        ]
+        print(json.dumps(enriched, indent=2))
         return 0
     if not records:
         print("no known peers recorded")
         return 0
     for row in records:
         addresses = ", ".join(row.get("addresses", [])) or "-"
-        print(f"{row['nickname']:16} {row['peer_id']}  {row['last_seen']}  {addresses}")
+        suffix = " [verified]" if verified_by_peer_id.get(str(row.get("peer_id") or ""), False) else ""
+        print(f"{row['nickname']:16} {row['peer_id']}  {row['last_seen']}  {addresses}{suffix}")
     return 0
 
 
@@ -1471,7 +1751,15 @@ def run_social_list(args: argparse.Namespace) -> int:
     runtime = RuntimePaths()
     rows = _social_store(runtime).read_all()
     if args.json:
-        print(json.dumps(rows, indent=2))
+        print(
+            json.dumps(
+                [
+                    dict(row, verified=bool(row.get("verified_at")))
+                    for row in rows
+                ],
+                indent=2,
+            )
+        )
         return 0
     if not rows:
         print("no social links recorded")
@@ -1560,6 +1848,7 @@ def run_social_unblock(args: argparse.Namespace) -> int:
 
 def run_social_fingerprint(args: argparse.Namespace) -> int:
     runtime = RuntimePaths()
+    state = StateStore(runtime.state_path).load()
     peer_rows = PeerStore(runtime.peers_path).read_all()
     social_row = None
     try:
@@ -1582,6 +1871,72 @@ def run_social_fingerprint(args: argparse.Namespace) -> int:
     print(f"favorite:          {bool(social_row.get('favorite')) if social_row else False}")
     print(f"blocked:           {bool(social_row.get('blocked')) if social_row else False}")
     print(f"verified_at:       {social_row.get('verified_at') if social_row else '-'}")
+    payload = build_verification_payload(
+        identity=state.identity,
+        nickname=state.nickname,
+        npub=NostrIdentity.from_private_key_hex(state.nostr_private_key_hex).npub,
+    )
+    print(f"verification_qr:   {payload.to_url()}")
+    return 0
+
+
+def run_social_verify(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    try:
+        record = _resolve_peer_or_social_target(runtime, args.target)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+    social = _social_store(runtime)
+    existing = social.get(str(record["peer_id"])) or {}
+    if args.payload:
+        try:
+            payload = VerificationPayload.from_url(args.payload)
+        except ValueError as exc:
+            print(str(exc))
+            return 1
+        if not verify_verification_payload(payload):
+            print("verification payload did not validate")
+            return 1
+        expected_noise = str(record.get("noise_public_key") or "")
+        expected_sign = str(record.get("signing_public_key") or "")
+        expected_npub = str(existing.get("nostr_npub") or "")
+        if expected_noise and payload.noise_key_hex.lower() != expected_noise.lower():
+            print("verification payload noise key does not match the selected peer")
+            return 1
+        if expected_sign and payload.sign_key_hex.lower() != expected_sign.lower():
+            print("verification payload signing key does not match the selected peer")
+            return 1
+        if expected_npub and payload.npub and payload.npub != expected_npub:
+            print("verification payload npub does not match the selected peer")
+            return 1
+    row = social.upsert(
+        peer_id=str(record["peer_id"]),
+        nickname=str(record.get("nickname") or record["peer_id"]),
+        nostr_npub=str(existing.get("nostr_npub") or "") or None,
+        nostr_pubkey_hex=str(existing.get("nostr_pubkey_hex") or "") or None,
+        verified=True,
+    )
+    print(f"{row['peer_id']} -> verified")
+    return 0
+
+
+def run_social_unverify(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    try:
+        record = _resolve_peer_or_social_target(runtime, args.target)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+    existing = _social_store(runtime).get(str(record["peer_id"])) or {}
+    row = _social_store(runtime).upsert(
+        peer_id=str(record["peer_id"]),
+        nickname=str(record.get("nickname") or record["peer_id"]),
+        nostr_npub=str(existing.get("nostr_npub") or "") or None,
+        nostr_pubkey_hex=str(existing.get("nostr_pubkey_hex") or "") or None,
+        verified=False,
+    )
+    print(f"{row['peer_id']} -> {'verified' if row.get('verified_at') else 'unverified'}")
     return 0
 
 
@@ -1664,7 +2019,10 @@ def run_dm_send(args: argparse.Namespace) -> int:
     except RuntimeError as exc:
         print(str(exc))
         return 1
-    print(f"queued dm {response['message_id']} to {peer['nickname']} ({peer['peer_id']})")
+    route = str(response.get("route") or response.get("transport") or "auto")
+    delivery_state = str(response.get("delivery_state") or "")
+    suffix = f" via {route}" + (f" [{delivery_state}]" if delivery_state else "")
+    print(f"queued dm {response['message_id']} to {peer['nickname']} ({peer['peer_id']}){suffix}")
     return 0
 
 
@@ -1798,6 +2156,383 @@ def run_geo_watch_list(args: argparse.Namespace) -> int:
         return 0
     for geohash in state.watched_geohashes:
         print(f"#{geohash}")
+    return 0
+
+
+def _geohash_channel_summary(runtime: RuntimePaths, geohash: str) -> dict[str, object]:
+    normalized = normalize_geohash(geohash)
+    state = StateStore(runtime.state_path).load()
+    channel_row = dict(state.geohash_channels.get(normalized, {}))
+    rows = MessageStore(runtime.inbox_path).read_all(deduplicate=True)
+    channel_rows = [row for row in rows if str(row.get("conversation_id") or "") == normalized]
+    participants = {
+        str(row.get("peer_id") or "")
+        for row in channel_rows
+        if str(row.get("message_kind") or "") in {"geohash_presence", "geohash_message"}
+        and str(row.get("peer_id") or "")
+    }
+    teleports = [row for row in channel_rows if bool(row.get("teleported"))]
+    last_activity = max((str(row.get("timestamp") or "") for row in channel_rows), default="")
+    return {
+        "geohash": normalized,
+        "name": channel_row.get("name"),
+        "note": channel_row.get("note"),
+        "bookmarked": bool(channel_row.get("bookmarked")),
+        "selected": bool(channel_row.get("selected")),
+        "teleport_context": bool(channel_row.get("teleport")),
+        "updated_at": channel_row.get("updated_at"),
+        "message_count": sum(1 for row in channel_rows if str(row.get("message_kind") or "") == "geohash_message"),
+        "presence_count": sum(1 for row in channel_rows if str(row.get("message_kind") or "") == "geohash_presence"),
+        "participant_count": len(participants),
+        "teleport_count": len(teleports),
+        "last_activity": last_activity or None,
+        "recent_teleports": [
+            {"sender": str(row.get("sender") or ""), "timestamp": str(row.get("timestamp") or "")}
+            for row in sorted(teleports, key=lambda row: str(row.get("timestamp") or ""), reverse=True)[:5]
+        ],
+    }
+
+
+def run_geo_channel_set(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    try:
+        geohash = _normalize_geo_target(args.geohash)
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
+    store = StateStore(runtime.state_path)
+    state = store.load()
+    channels = dict(state.geohash_channels)
+    row = dict(channels.get(geohash, {}))
+    if args.name is not None:
+        row["name"] = args.name.strip() or None
+    if args.note is not None:
+        row["note"] = args.note.strip() or None
+    if args.bookmark:
+        row["bookmarked"] = True
+    if args.unbookmark:
+        row["bookmarked"] = False
+    if args.teleport:
+        row["teleport"] = True
+    if args.no_teleport:
+        row["teleport"] = False
+    if args.select:
+        for existing in channels.values():
+            existing["selected"] = False
+        row["selected"] = True
+    if args.unselect:
+        row["selected"] = False
+    row["updated_at"] = datetime.now(timezone.utc).isoformat()
+    channels[geohash] = row
+    state.geohash_channels = channels
+    store.save(state)
+    print(f"saved channel metadata for #{geohash}")
+    return 0
+
+
+def run_geo_channel_show(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    try:
+        payload = _geohash_channel_summary(runtime, args.geohash)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+    print(f"geohash:          #{payload['geohash']}")
+    print(f"name:             {payload.get('name') or '-'}")
+    print(f"bookmarked:       {payload['bookmarked']}")
+    print(f"selected:         {payload['selected']}")
+    print(f"teleport_context: {payload['teleport_context']}")
+    print(f"note:             {payload.get('note') or '-'}")
+    print(f"message_count:    {payload['message_count']}")
+    print(f"presence_count:   {payload['presence_count']}")
+    print(f"participant_count:{payload['participant_count']}")
+    print(f"teleport_count:   {payload['teleport_count']}")
+    print(f"last_activity:    {payload.get('last_activity') or '-'}")
+    return 0
+
+
+def run_geo_channel_list(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    state = StateStore(runtime.state_path).load()
+    rows = [
+        _geohash_channel_summary(runtime, geohash)
+        for geohash in sorted(state.geohash_channels)
+        if not args.bookmarked or bool(state.geohash_channels.get(geohash, {}).get("bookmarked"))
+    ]
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        print("no geohash channel metadata saved")
+        return 0
+    for row in rows:
+        flags: list[str] = []
+        if row.get("bookmarked"):
+            flags.append("bookmark")
+        if row.get("selected"):
+            flags.append("selected")
+        if row.get("teleport_context"):
+            flags.append("teleport")
+        suffix = f" [{' '.join(flags)}]" if flags else ""
+        name = f" {row['name']}" if row.get("name") else ""
+        print(f"#{row['geohash']}{name}{suffix}")
+    return 0
+
+
+def run_geo_notes_add(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    state = StateStore(runtime.state_path).load()
+    try:
+        event = asyncio.run(
+            publish_location_note(
+                relay_cache_path=runtime.georelays_cache_path,
+                network_config=NetworkConfig.from_state(state),
+                geohash=_normalize_geo_target(args.geohash),
+                content=args.message,
+                nickname=state.nickname,
+                seed_hex=state.nostr_device_seed_hex,
+            )
+        )
+    except Exception as exc:
+        print(str(exc))
+        return 1
+    print(f"published location note {event['id']}")
+    return 0
+
+
+def run_geo_notes_list(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    state = StateStore(runtime.state_path).load()
+    try:
+        notes = asyncio.run(
+            fetch_location_notes(
+                relay_cache_path=runtime.georelays_cache_path,
+                network_config=NetworkConfig.from_state(state),
+                geohash=_normalize_geo_target(args.geohash),
+                limit=int(args.limit),
+            )
+        )
+    except Exception as exc:
+        print(str(exc))
+        return 1
+    payload = [
+        {
+            "event_id": note.event_id,
+            "pubkey": note.pubkey,
+            "geohash": note.geohash,
+            "content": note.content,
+            "created_at": note.created_at,
+            "nickname": note.nickname,
+            "display_name": note.display_name,
+        }
+        for note in notes
+    ]
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+    if not notes:
+        print("no location notes found")
+        return 0
+    for note in notes:
+        timestamp = datetime.fromtimestamp(note.created_at, tz=timezone.utc).isoformat()
+        print(f"{timestamp} <{note.display_name}> {note.content}")
+    return 0
+
+
+def run_geo_participant_show(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    try:
+        record = _ensure_geo_participant_record(runtime, geohash=args.geohash, target=args.target)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+    print(f"peer_id:           {record['peer_id']}")
+    print(f"nickname:          {record.get('nickname') or '-'}")
+    print(f"nostr_pubkey_hex:  {record.get('nostr_pubkey_hex') or '-'}")
+    print(f"favorite:          {bool(record.get('favorite'))}")
+    print(f"blocked:           {bool(record.get('blocked'))}")
+    print(f"verified_at:       {record.get('verified_at') or '-'}")
+    return 0
+
+
+def run_geo_participant_block(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    try:
+        record = _ensure_geo_participant_record(runtime, geohash=args.geohash, target=args.target, allow_unseen=True)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+    row = _social_store(runtime).upsert(
+        peer_id=str(record["peer_id"]),
+        nickname=str(record.get("nickname") or record["peer_id"]),
+        nostr_pubkey_hex=str(record.get("nostr_pubkey_hex") or record["peer_id"]),
+        blocked=True,
+    )
+    print(f"{row['peer_id']} -> blocked")
+    return 0
+
+
+def run_geo_participant_unblock(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    try:
+        record = _ensure_geo_participant_record(runtime, geohash=args.geohash, target=args.target, allow_unseen=True)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+    row = _social_store(runtime).upsert(
+        peer_id=str(record["peer_id"]),
+        nickname=str(record.get("nickname") or record["peer_id"]),
+        nostr_pubkey_hex=str(record.get("nostr_pubkey_hex") or record["peer_id"]),
+        blocked=False,
+    )
+    print(f"{row['peer_id']} -> {'blocked' if row.get('blocked') else 'neutral'}")
+    return 0
+
+
+def run_geo_dm_send(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    try:
+        geohash = _normalize_geo_target(args.geohash)
+        participant = _ensure_geo_participant_record(runtime, geohash=geohash, target=args.target, allow_unseen=True)
+        response = DaemonClient(runtime).send_geo_dm(
+            geohash=geohash,
+            peer_pubkey=str(participant.get("nostr_pubkey_hex") or participant["peer_id"]),
+            content=args.message,
+        )
+    except (RuntimeError, ValueError) as exc:
+        print(str(exc))
+        return 1
+    print(f"queued geo dm {response['message_id']} to {participant.get('nickname') or participant['peer_id']} in #{geohash}")
+    return 0
+
+
+def run_geo_dm_history(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    try:
+        geohash = _normalize_geo_target(args.geohash)
+        participant = _ensure_geo_participant_record(runtime, geohash=geohash, target=args.target, allow_unseen=True)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+    conversation_id = f"{geohash}:{participant['peer_id']}"
+    rows = [
+        row
+        for row in MessageStore(runtime.inbox_path).read_all(deduplicate=True)
+        if str(row.get("scope") or "") == "geo_dm"
+        and str(row.get("conversation_id") or "") == conversation_id
+    ]
+    rows.sort(key=lambda row: str(row.get("timestamp") or ""))
+    if args.tail is not None:
+        rows = rows[-args.tail :]
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        print("no geohash direct messages recorded for that participant")
+        return 0
+    for row in rows:
+        if row.get("message_kind") == "receipt":
+            print(f"{row['timestamp']} [receipt] {row['content']} {row['message_id']}")
+            continue
+        print(f"{row['timestamp']} <{row['sender']}> {row['content']}")
+    return 0
+
+
+def run_topic_join(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    try:
+        channel = _normalize_topic_channel(args.channel)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+    store = StateStore(runtime.state_path)
+    state = store.load()
+    row = dict(state.topic_channels.get(channel, {}))
+    row["joined"] = True
+    row["password_set"] = bool(args.password or row.get("password"))
+    if args.password is not None:
+        row["password"] = args.password
+    if args.retain:
+        row["retention"] = True
+    row["updated_at"] = datetime.now(timezone.utc).isoformat()
+    state.topic_channels = dict(state.topic_channels)
+    state.topic_channels[channel] = row
+    store.save(state)
+    print(f"joined {channel}")
+    return 0
+
+
+def run_topic_leave(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    store = StateStore(runtime.state_path)
+    state = store.load()
+    channel = _normalize_topic_channel(args.channel)
+    if channel in state.topic_channels:
+        row = dict(state.topic_channels[channel])
+        row["joined"] = False
+        row["updated_at"] = datetime.now(timezone.utc).isoformat()
+        state.topic_channels[channel] = row
+        store.save(state)
+    print(f"left {channel}")
+    return 0
+
+
+def run_topic_list(args: argparse.Namespace) -> int:
+    state = StateStore().load()
+    rows = [
+        {"channel": channel, **row}
+        for channel, row in sorted(state.topic_channels.items())
+    ]
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        print("no topic channels configured")
+        return 0
+    for row in rows:
+        flags: list[str] = []
+        if row.get("joined"):
+            flags.append("joined")
+        if row.get("password_set"):
+            flags.append("password")
+        if row.get("retention"):
+            flags.append("retention")
+        suffix = f" [{' '.join(flags)}]" if flags else ""
+        print(f"{row['channel']}{suffix}")
+    return 0
+
+
+def run_topic_password_set(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    store = StateStore(runtime.state_path)
+    state = store.load()
+    channel = _normalize_topic_channel(args.channel)
+    row = dict(state.topic_channels.get(channel, {}))
+    row["password"] = args.password or None
+    row["password_set"] = bool(args.password)
+    row["updated_at"] = datetime.now(timezone.utc).isoformat()
+    state.topic_channels = dict(state.topic_channels)
+    state.topic_channels[channel] = row
+    store.save(state)
+    print(f"{channel} password {'set' if args.password else 'cleared'}")
+    return 0
+
+
+def run_topic_retain(args: argparse.Namespace) -> int:
+    runtime = RuntimePaths()
+    store = StateStore(runtime.state_path)
+    state = store.load()
+    channel = _normalize_topic_channel(args.channel)
+    row = dict(state.topic_channels.get(channel, {}))
+    row["retention"] = args.enabled == "on"
+    row["updated_at"] = datetime.now(timezone.utc).isoformat()
+    state.topic_channels = dict(state.topic_channels)
+    state.topic_channels[channel] = row
+    store.save(state)
+    print(f"{channel} retention {'enabled' if row['retention'] else 'disabled'}")
     return 0
 
 

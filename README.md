@@ -21,16 +21,19 @@ Current scope:
 - Local public-message, fragment, and public file-transfer sync over `REQUEST_SYNC` with official-style `RSR` responses
 - Private-message history capture plus `dm inbox` / `dm history`
 - Linked-peer Nostr DM fallback for offline text/receipt delivery
-- CLI-native social trust commands for linking, favoriting, blocking, and fingerprint inspection
+- Geohash-scoped Nostr DMs for watched or selected geohash identities
+- Persistent location notes over Nostr for building-level geohashes
+- Local geohash channel metadata for names, notes, bookmarks, selected context, and teleport hints
+- CLI-native social trust commands for linking, favoriting, blocking, fingerprint inspection, and verified state
+- Offline DM queueing for known peers until the BLE route comes back
+- Local Android-style named topic channel metadata for password / retention tracking
 - Proxy-aware network policy for geohash relay traffic, lookup, and Nostr fallback
 - Offline geohash discovery helpers for region/province/city/neighborhood/block/building derivation
 - Offline protocol self-tests
 
 Still not implemented:
 
-- Presence counts and the full location-channel sheet model from the app UI
 - Nostr fallback for files
-- Geohash-scoped Nostr DMs
 
 ## Quick start
 
@@ -73,13 +76,24 @@ uv run bitchat geo send u4pruy --pow 12 "hello with PoW"
 uv run bitchat geo send u4pruy --teleport "hello from a teleported channel"
 uv run bitchat geo inbox u4pruy --tail 20
 uv run bitchat geo who u4pruy
+uv run bitchat geo channel set u4pruy --name "Home" --bookmark --select
+uv run bitchat geo channel show u4pruy
+uv run bitchat geo notes add u4pruydq "quiet after 9pm"
+uv run bitchat geo notes list u4pruydq
+uv run bitchat geo participant show u4pruy <pubkey>
+uv run bitchat geo participant block u4pruy <pubkey>
+uv run bitchat geo dm send u4pruy <pubkey> "hello from geo dm"
+uv run bitchat geo dm history u4pruy <pubkey>
 uv run bitchat peers
 uv run bitchat social link @bubbles <npub>
 uv run bitchat social favorite @bubbles
 uv run bitchat social fingerprint @bubbles
+uv run bitchat social verify @bubbles
 uv run bitchat inbox --tail 20
 uv run bitchat mesh inbox --tail 20
 uv run bitchat dm send @bubbles "hello from daemon"
+uv run bitchat topic join btc --password secret --retain
+uv run bitchat topic list
 uv run bitchat send-file ./photo.jpg
 uv run bitchat mesh send-file ./photo.jpg
 uv run bitchat dm send-file @bubbles ./photo.jpg
@@ -124,6 +138,17 @@ Behavior notes:
 - `geo watch add/remove/list` manages the geohash channels the daemon keeps
   subscribed in the background, so location-channel messages can arrive while
   no interactive client is open.
+- `geo channel set/show/list` stores local channel metadata the mobile sheets
+  expose visually: friendly names, bookmarks, private notes, one selected
+  context, and a saved teleport hint.
+- `geo notes add/list` publishes and fetches persistent Nostr kind `1` location
+  notes for building-level geohashes (8 characters), matching the app's
+  location-note concept in a CLI command surface.
+- `geo participant show/block/unblock` overlays trust state onto Nostr geohash
+  participants, and `geo who` now annotates favorite / blocked / verified flags.
+- `geo dm send/history` uses per-geohash Nostr identities and no-recipient
+  embedded BitChat payloads, so the CLI can interoperate with the mobile apps'
+  geohash-scoped direct messages.
 - `network proxy ...` sets one privacy policy for every remote path in the CLI
   instead of sprinkling ad hoc proxy flags across commands. `--policy require`
   is the fail-closed mode when you care more about privacy than convenience.
@@ -203,6 +228,15 @@ Behavior notes:
   BLE stays first; if the daemon has no live BitChat link for that peer, text
   DMs and read/delivery receipts can fall back to NIP-17 gift-wrapped Nostr
   messages using the linked `npub`.
+- `social verify` marks a peer verified locally, and `social fingerprint` now
+  prints a signed verification payload you can paste into another CLI for an
+  out-of-band check before trusting that identity.
+- `dm send` now queues text DMs for known-but-offline BLE peers instead of
+  failing immediately, reusing the transport's pending Noise payload queue
+  until the peer reconnects.
+- `topic join/list/leave/password/retain` exposes the Android-only named
+  channel metadata as a local CLI surface without expanding the public mesh
+  transport model beyond `#mesh` plus geohashes.
 - Only one CLI BLE session can own the radio at a time, so `chat` and `daemon`
   no longer run concurrently.
 

@@ -84,6 +84,17 @@ class FakeDaemonClient:
         )
         return self.responses.get("geo_send", {"message_id": "geo-1"})
 
+    def send_geo_dm(self, *, geohash: str, peer_pubkey: str, content: str) -> dict[str, object]:
+        self.calls.append(
+            {
+                "command": "geo_dm_send",
+                "geohash": geohash,
+                "peer_pubkey": peer_pubkey,
+                "content": content,
+            }
+        )
+        return self.responses.get("geo_dm_send", {"message_id": "geo-dm-1"})
+
     def set_geo_watches(self, geohashes: list[str]) -> dict[str, object]:
         self.calls.append({"command": "geo_watch_set", "geohashes": geohashes})
         return self.responses.get("geo_watch_set", {"geohashes": geohashes})
@@ -643,6 +654,175 @@ def test_run_geo_watch_list_prints_configured_geohashes(tmp_path: Path, monkeypa
     assert "#u4xj" in captured.out
 
 
+def test_run_geo_channel_set_persists_metadata(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+
+    exit_code = app.run_geo_channel_set(
+        argparse.Namespace(
+            geohash="#u4pruy",
+            name="Home",
+            note="quiet after 9pm",
+            bookmark=True,
+            unbookmark=False,
+            select=True,
+            unselect=False,
+            teleport=True,
+            no_teleport=False,
+        )
+    )
+
+    state = app.StateStore(runtime.state_path).load()
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "saved channel metadata" in captured.out
+    assert state.geohash_channels["u4pruy"]["name"] == "Home"
+    assert state.geohash_channels["u4pruy"]["bookmarked"] is True
+    assert state.geohash_channels["u4pruy"]["selected"] is True
+    assert state.geohash_channels["u4pruy"]["teleport"] is True
+
+
+def test_run_geo_channel_show_reports_activity_summary(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    state = app.StateStore(runtime.state_path).load()
+    state.geohash_channels = {"u4pruy": {"name": "Home", "bookmarked": True}}
+    app.StateStore(runtime.state_path).save(state)
+    store = MessageStore(runtime.inbox_path)
+    store.append(
+        direction="inbound",
+        sender="bubbles#1234",
+        content="hello",
+        timestamp=datetime(2026, 6, 24, 12, 0, 0, tzinfo=timezone.utc),
+        peer_id="22" * 32,
+        message_id="geo-msg-show-1",
+        scope="public",
+        conversation_id="u4pruy",
+        message_kind="geohash_message",
+        teleported=True,
+    )
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+
+    exit_code = app.run_geo_channel_show(argparse.Namespace(geohash="#u4pruy", json=False))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Home" in captured.out
+    assert "message_count" in captured.out
+    assert "teleport_count" in captured.out
+
+
+def test_run_geo_participant_block_creates_social_overlay_from_geohash_history(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    MessageStore(runtime.inbox_path).append(
+        direction="inbound",
+        sender="bubbles#1234",
+        content="hello",
+        timestamp=datetime(2026, 6, 24, 12, 0, 0, tzinfo=timezone.utc),
+        peer_id="22" * 32,
+        message_id="geo-msg-block-1",
+        scope="public",
+        conversation_id="u4pruy",
+        message_kind="geohash_message",
+    )
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+
+    exit_code = app.run_geo_participant_block(argparse.Namespace(geohash="#u4pruy", target="@bubbles#1234"))
+
+    captured = capsys.readouterr()
+    row = app._social_store(runtime).get("22" * 32)
+    assert exit_code == 0
+    assert "blocked" in captured.out
+    assert row is not None
+    assert row["blocked"] is True
+
+
+def test_run_geo_dm_send_uses_daemon_command_and_participant_pubkey(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    app._social_store(runtime).upsert(
+        peer_id="22" * 32,
+        nickname="bubbles#1234",
+        nostr_pubkey_hex="22" * 32,
+    )
+    fake_client = FakeDaemonClient()
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+    monkeypatch.setattr(app, "DaemonClient", lambda _runtime: fake_client)
+
+    exit_code = app.run_geo_dm_send(argparse.Namespace(geohash="#u4pruy", target="@bubbles#1234", message="hello geo dm"))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert fake_client.calls == [
+        {
+            "command": "geo_dm_send",
+            "geohash": "u4pruy",
+            "peer_pubkey": "22" * 32,
+            "content": "hello geo dm",
+        }
+    ]
+    assert "queued geo dm" in captured.out
+
+
+def test_run_geo_dm_history_filters_one_geohash_conversation(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    app._social_store(runtime).upsert(
+        peer_id="22" * 32,
+        nickname="bubbles#1234",
+        nostr_pubkey_hex="22" * 32,
+    )
+    store = MessageStore(runtime.inbox_path)
+    store.append(
+        direction="inbound",
+        sender="bubbles#1234",
+        content="hello geo dm",
+        timestamp=datetime(2026, 6, 24, 12, 0, 0, tzinfo=timezone.utc),
+        peer_id="22" * 32,
+        message_id="geo-dm-1",
+        scope="geo_dm",
+        conversation_id=f"u4pruy:{'22' * 32}",
+        message_kind="private_message",
+    )
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+
+    exit_code = app.run_geo_dm_history(argparse.Namespace(geohash="#u4pruy", target="@bubbles#1234", json=False, tail=None))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "hello geo dm" in captured.out
+
+
+def test_run_geo_notes_list_renders_fetched_notes(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    state = app.StateStore(runtime.state_path).load()
+    state.nostr_device_seed_hex = "11" * 32
+    app.StateStore(runtime.state_path).save(state)
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+    
+    class FakeNote:
+        def __init__(self) -> None:
+            self.event_id = "note-1"
+            self.pubkey = "22" * 32
+            self.geohash = "u4pruydq"
+            self.content = "watch the back door"
+            self.created_at = 1_719_230_400
+            self.nickname = "bubbles"
+
+        @property
+        def display_name(self) -> str:
+            return "bubbles#2222"
+
+    async def fake_fetch_location_notes(**_kwargs):
+        return [FakeNote()]
+
+    monkeypatch.setattr(app, "fetch_location_notes", fake_fetch_location_notes)
+
+    exit_code = app.run_geo_notes_list(argparse.Namespace(geohash="#u4pruydq", json=False, limit=5))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "watch the back door" in captured.out
+    assert "bubbles#2222" in captured.out
+
+
 def test_run_dm_inbox_summarizes_private_conversations(tmp_path: Path, monkeypatch, capsys) -> None:
     runtime = RuntimePaths(tmp_path)
     identity = Identity.generate()
@@ -796,6 +976,7 @@ def test_run_dm_send_uses_daemon_command_and_resolves_nickname(tmp_path: Path, m
         }
     ]
     assert "dm-1" in captured.out
+    assert "via" in captured.out
 
 
 def test_run_dm_send_file_uses_daemon_command_and_resolves_nickname(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -826,6 +1007,44 @@ def test_run_dm_send_file_uses_daemon_command_and_resolves_nickname(tmp_path: Pa
         }
     ]
     assert "file-1" in captured.out
+
+
+def test_run_social_verify_marks_linked_peer_verified(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    identity = Identity.generate()
+    PeerStore(runtime.peers_path).upsert(
+        peer_id=identity.peer_id,
+        nickname="bubbles",
+        noise_public_key=identity.noise_public_key,
+        signing_public_key=identity.signing_public_key,
+        addresses={"A1"},
+        last_seen=datetime(2026, 6, 24, 0, 9, 44, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+
+    exit_code = app.run_social_verify(argparse.Namespace(target="@bubbles", payload=None))
+
+    captured = capsys.readouterr()
+    row = app._social_store(runtime).get(identity.peer_id)
+    assert exit_code == 0
+    assert "verified" in captured.out
+    assert row is not None
+    assert row["verified_at"] is not None
+
+
+def test_run_topic_join_persists_local_topic_metadata(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+
+    exit_code = app.run_topic_join(argparse.Namespace(channel="btc", password="secret", retain=True))
+
+    captured = capsys.readouterr()
+    state = app.StateStore(runtime.state_path).load()
+    assert exit_code == 0
+    assert "joined #btc" in captured.out
+    assert state.topic_channels["#btc"]["joined"] is True
+    assert state.topic_channels["#btc"]["password_set"] is True
+    assert state.topic_channels["#btc"]["retention"] is True
 
 
 def test_run_send_uses_daemon_command(tmp_path: Path, monkeypatch, capsys) -> None:

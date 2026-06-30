@@ -110,6 +110,7 @@ class InboundNostrMessage:
     peer_id: str
     sender_pubkey_hex: str
     sender_peer_id: str
+    recipient_pubkey_hex: str
     timestamp_ms: int
     event_id: str
     message_kind: str
@@ -186,6 +187,41 @@ def encode_bitchat_receipt(*, sender_peer_id: str, recipient_peer_id: str, recei
     return "bitchat1:" + base64url_encode(packet.encode(padding=True))
 
 
+def encode_bitchat_private_message_no_recipient(*, sender_peer_id: str, message_id: str, content: str) -> str:
+    payload = NoisePayload(
+        payload_type=NoisePayloadType.PRIVATE_MESSAGE,
+        payload=PrivateMessagePacket(message_id=message_id, content=content).encode(),
+    ).encode()
+    packet = Packet(
+        packet_type=MessageType.NOISE_ENCRYPTED,
+        sender_id=bytes.fromhex(sender_peer_id),
+        recipient_id=None,
+        payload=payload,
+        ttl=7,
+        version=1,
+    )
+    return "bitchat1:" + base64url_encode(packet.encode(padding=True))
+
+
+def encode_bitchat_receipt_no_recipient(*, sender_peer_id: str, receipt_type: str, message_id: str) -> str:
+    payload_type = {
+        "delivered": NoisePayloadType.DELIVERED,
+        "read_receipt": NoisePayloadType.READ_RECEIPT,
+    }.get(receipt_type)
+    if payload_type is None:
+        raise NostrError("unsupported receipt type")
+    payload = NoisePayload(payload_type=payload_type, payload=message_id.encode("utf-8")).encode()
+    packet = Packet(
+        packet_type=MessageType.NOISE_ENCRYPTED,
+        sender_id=bytes.fromhex(sender_peer_id),
+        recipient_id=None,
+        payload=payload,
+        ttl=7,
+        version=1,
+    )
+    return "bitchat1:" + base64url_encode(packet.encode(padding=True))
+
+
 def decode_bitchat_payload(content: str) -> InboundNostrMessage:
     if not content.startswith("bitchat1:"):
         raise NostrError("unsupported Nostr payload")
@@ -212,6 +248,7 @@ def decode_bitchat_payload(content: str) -> InboundNostrMessage:
         peer_id=packet.recipient_id.hex() if packet.recipient_id is not None else "",
         sender_pubkey_hex="",
         sender_peer_id=packet.sender_id.hex(),
+        recipient_pubkey_hex="",
         timestamp_ms=packet.timestamp_ms,
         event_id="",
         message_kind=message_kind,
@@ -259,23 +296,31 @@ class NostrDMClient:
         self.network_config = network_config
         self.on_message = on_message
         self.system_log = system_log or (lambda _message: None)
-        self._watch_tasks: list[asyncio.Task[None]] = []
+        self._watch_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._recent_event_ids: set[str] = set()
         self._read_ack_lock = asyncio.Lock()
+        self._extra_watch_identities: dict[str, NostrIdentity] = {}
 
     async def start(self) -> None:
         if self._watch_tasks or not self.relay_urls:
             return
-        for relay_url in self.relay_urls:
-            self._watch_tasks.append(asyncio.create_task(self._watch_loop(relay_url)))
+        await self._sync_watch_tasks()
 
     async def stop(self) -> None:
-        tasks = list(self._watch_tasks)
+        tasks = list(self._watch_tasks.values())
         self._watch_tasks.clear()
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def set_extra_watch_identities(self, identities: list[NostrIdentity]) -> None:
+        self._extra_watch_identities = {
+            item.public_key_hex: item
+            for item in identities
+        }
+        if self.relay_urls:
+            await self._sync_watch_tasks()
 
     async def send_private_message(
         self,
@@ -296,6 +341,28 @@ class NostrDMClient:
             content=embedded,
             recipient_pubkey_hex=decode_npub(recipient_npub),
             sender_identity=self.identity,
+        )
+        await self._publish_event(event)
+        return event.id
+
+    async def send_geohash_private_message(
+        self,
+        *,
+        sender_peer_id: str,
+        sender_identity: NostrIdentity,
+        recipient_pubkey_hex: str,
+        message_id: str,
+        content: str,
+    ) -> str:
+        embedded = encode_bitchat_private_message_no_recipient(
+            sender_peer_id=sender_peer_id,
+            message_id=message_id,
+            content=content,
+        )
+        event = create_private_message_event(
+            content=embedded,
+            recipient_pubkey_hex=recipient_pubkey_hex,
+            sender_identity=sender_identity,
         )
         await self._publish_event(event)
         return event.id
@@ -328,6 +395,33 @@ class NostrDMClient:
             await self._publish_event(event)
         return event.id
 
+    async def send_geohash_receipt(
+        self,
+        *,
+        sender_peer_id: str,
+        sender_identity: NostrIdentity,
+        recipient_pubkey_hex: str,
+        receipt_type: str,
+        message_id: str,
+    ) -> str:
+        embedded = encode_bitchat_receipt_no_recipient(
+            sender_peer_id=sender_peer_id,
+            receipt_type=receipt_type,
+            message_id=message_id,
+        )
+        event = create_private_message_event(
+            content=embedded,
+            recipient_pubkey_hex=recipient_pubkey_hex,
+            sender_identity=sender_identity,
+        )
+        if receipt_type == "read_receipt":
+            async with self._read_ack_lock:
+                await self._publish_event(event)
+                await asyncio.sleep(_READ_ACK_THROTTLE_SECONDS)
+        else:
+            await self._publish_event(event)
+        return event.id
+
     async def _publish_event(self, event: NostrEvent) -> None:
         if not self.relay_urls:
             raise NostrError("no Nostr relays configured")
@@ -349,11 +443,31 @@ class NostrDMClient:
         if successes == 0:
             raise NostrError("failed to publish to any Nostr relay")
 
-    async def _watch_loop(self, relay_url: str) -> None:
-        subscription_id = f"dm-{self.identity.public_key_hex[:12]}"
+    async def _sync_watch_tasks(self) -> None:
+        desired: dict[tuple[str, str], NostrIdentity] = {}
+        identities = [self.identity, *self._extra_watch_identities.values()]
+        for relay_url in self.relay_urls:
+            for identity in identities:
+                desired[(relay_url, identity.public_key_hex)] = identity
+
+        existing = set(self._watch_tasks)
+        desired_keys = set(desired)
+        removed_tasks: list[asyncio.Task[None]] = []
+        for key in existing - desired_keys:
+            task = self._watch_tasks.pop(key)
+            task.cancel()
+            removed_tasks.append(task)
+        if removed_tasks:
+            await asyncio.gather(*removed_tasks, return_exceptions=True)
+        for key in desired_keys - existing:
+            relay_url, _ = key
+            self._watch_tasks[key] = asyncio.create_task(self._watch_loop(relay_url, desired[key]))
+
+    async def _watch_loop(self, relay_url: str, recipient_identity: NostrIdentity) -> None:
+        subscription_id = f"dm-{recipient_identity.public_key_hex[:12]}"
         filter_payload = {
             "kinds": [1059],
-            "#p": [self.identity.public_key_hex],
+            "#p": [recipient_identity.public_key_hex],
             "since": max(0, int(time.time()) - _LOOKBACK_SECONDS),
         }
         while True:
@@ -367,7 +481,7 @@ class NostrDMClient:
                 ) as websocket:
                     await websocket.send(json.dumps(["REQ", subscription_id, filter_payload], separators=(",", ":")))
                     async for raw_message in websocket:
-                        self._handle_relay_message(raw_message)
+                        self._handle_relay_message(raw_message, recipient_identity=recipient_identity)
             except asyncio.CancelledError:
                 return
             except ConnectionClosed as exc:
@@ -376,7 +490,7 @@ class NostrDMClient:
                 self.system_log(f"nostr relay error {relay_url}: {exc}")
             await asyncio.sleep(2.0)
 
-    def _handle_relay_message(self, raw_message: str) -> None:
+    def _handle_relay_message(self, raw_message: str, *, recipient_identity: NostrIdentity) -> None:
         try:
             payload = json.loads(raw_message)
         except json.JSONDecodeError:
@@ -392,7 +506,7 @@ class NostrDMClient:
         try:
             content, sender_pubkey_hex, rumor_timestamp = decrypt_private_message(
                 gift_wrap=event,
-                recipient_identity=self.identity,
+                recipient_identity=recipient_identity,
             )
             decoded = decode_bitchat_payload(content)
         except Exception:
@@ -401,6 +515,7 @@ class NostrDMClient:
             peer_id=decoded.peer_id,
             sender_pubkey_hex=sender_pubkey_hex,
             sender_peer_id=decoded.sender_peer_id,
+            recipient_pubkey_hex=recipient_identity.public_key_hex,
             timestamp_ms=rumor_timestamp * 1000,
             event_id=event.id,
             message_kind=decoded.message_kind,

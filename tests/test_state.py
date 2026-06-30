@@ -182,6 +182,35 @@ def test_message_store_persists_scope_and_conversation_metadata(tmp_path: Path) 
     assert rows[0]["attachment_size_bytes"] == 12345
 
 
+def test_state_store_round_trips_geohash_and_topic_channel_metadata(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.json")
+    state = store.load()
+    state.geohash_channels = {
+        "u4pruy": {
+            "name": "Home",
+            "note": "quiet after 9pm",
+            "bookmarked": True,
+            "selected": True,
+            "teleport": False,
+        }
+    }
+    state.topic_channels = {
+        "#btc": {
+            "joined": True,
+            "password_set": True,
+            "retention": True,
+        }
+    }
+    store.save(state)
+
+    loaded = store.load()
+
+    assert loaded.geohash_channels["u4pruy"]["name"] == "Home"
+    assert loaded.geohash_channels["u4pruy"]["bookmarked"] is True
+    assert loaded.topic_channels["#btc"]["joined"] is True
+    assert loaded.topic_channels["#btc"]["retention"] is True
+
+
 def test_peer_store_upserts_replaces_addresses_on_newer_observation(tmp_path: Path) -> None:
     store = PeerStore(tmp_path / "peers.json")
     identity = Identity.generate()

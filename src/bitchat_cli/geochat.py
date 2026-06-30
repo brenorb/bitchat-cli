@@ -12,8 +12,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
-from urllib.error import URLError
-
 from coincurve import PrivateKey, PublicKeyXOnly
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed

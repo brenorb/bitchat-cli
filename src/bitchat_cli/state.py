@@ -33,6 +33,27 @@ def _has_app_artifacts(path: Path) -> bool:
     return any((path / name).exists() for name in _APP_ARTIFACT_NAMES)
 
 
+def _normalize_nested_channel_map(
+    value: Any,
+    *,
+    allow_hash_prefix: bool = False,
+) -> dict[str, dict[str, object]]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, dict[str, object]] = {}
+    for raw_key, raw_row in value.items():
+        key = str(raw_key).strip().lower()
+        if not key:
+            continue
+        if not allow_hash_prefix:
+            key = key.replace("#", "")
+        elif not key.startswith("#"):
+            key = f"#{key}"
+        row = raw_row if isinstance(raw_row, dict) else {}
+        normalized[key] = {str(inner_key): inner_value for inner_key, inner_value in row.items()}
+    return normalized
+
+
 def default_app_dir() -> Path:
     preferred = Path.home() / ".config" / "bitchat"
     legacy = Path.home() / ".config" / "bitchat-cli"
@@ -58,6 +79,8 @@ class AppState:
     network_proxy_url: str | None
     network_proxy_policy: str
     watched_geohashes: list[str]
+    geohash_channels: dict[str, dict[str, object]]
+    topic_channels: dict[str, dict[str, object]]
 
     @classmethod
     def create(cls) -> "AppState":
@@ -73,6 +96,8 @@ class AppState:
             network_proxy_url=None,
             network_proxy_policy="prefer",
             watched_geohashes=[],
+            geohash_channels={},
+            topic_channels={},
         )
 
     def to_json(self) -> dict[str, str]:
@@ -85,6 +110,8 @@ class AppState:
         data["network_proxy_url"] = self.network_proxy_url
         data["network_proxy_policy"] = self.network_proxy_policy
         data["watched_geohashes"] = list(self.watched_geohashes)
+        data["geohash_channels"] = self.geohash_channels
+        data["topic_channels"] = self.topic_channels
         return data
 
 
@@ -130,6 +157,8 @@ class StateStore:
                 for item in data.get("watched_geohashes", [])
                 if str(item)
             ],
+            geohash_channels=_normalize_nested_channel_map(data.get("geohash_channels")),
+            topic_channels=_normalize_nested_channel_map(data.get("topic_channels"), allow_hash_prefix=True),
         )
         if (
             "nostr_device_seed" not in data
@@ -138,6 +167,8 @@ class StateStore:
             or "network_proxy_mode" not in data
             or "network_proxy_policy" not in data
             or "watched_geohashes" not in data
+            or "geohash_channels" not in data
+            or "topic_channels" not in data
         ):
             self.save(state)
         return state
