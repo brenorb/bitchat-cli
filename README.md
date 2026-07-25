@@ -4,6 +4,11 @@
 local Bluetooth LE mesh chat with location-scoped Nostr channels, while keeping
 the two transports explicit in the command surface:
 
+This project is a Python CLI port based on the public behavior and reference
+implementations from Permissionless Tech's [BitChat for iOS/macOS](https://github.com/permissionlesstech/bitchat)
+and [BitChat for Android](https://github.com/permissionlesstech/bitchat-android).
+Those projects remain the primary references for platform interoperability.
+
 - `#mesh` uses Bluetooth LE. It works without the internet, relays signed public
   packets through nearby peers, and supports Noise-encrypted DMs, receipts,
   files, and public sync after reconnect.
