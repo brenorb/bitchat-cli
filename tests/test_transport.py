@@ -817,7 +817,8 @@ def test_periodic_announce_refreshes_presence_and_stops_with_transport() -> None
         try:
             await transport.start()
             await asyncio.sleep(0.03)
-            assert any(packet.packet_type == MessageType.ANNOUNCE for packet in captured)
+            announces = [packet for packet in captured if packet.packet_type == MessageType.ANNOUNCE]
+            assert len(announces) >= 2
         finally:
             await transport.stop()
             transport_module._ANNOUNCE_INTERVAL_SECONDS = original_interval
