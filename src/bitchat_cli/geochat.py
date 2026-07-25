@@ -29,6 +29,7 @@ _DEFAULT_POW_MAX_ITERATIONS = 2_000_000
 _DEFAULT_PRESENCE_INTERVAL_RANGE_SECONDS = (40.0, 80.0)
 _DEFAULT_PRESENCE_STEP_DELAY_RANGE_SECONDS = (1.0, 10.0)
 _DEFAULT_PRESENCE_IDLE_SECONDS = 10.0
+_GEO_PUBLISH_ACK_TIMEOUT_SECONDS = 10.0
 _GEOHASH_LEVEL_PRECISIONS = {
     "region": 2,
     "province": 4,
@@ -541,7 +542,20 @@ class GeoChatDaemon:
         relays = closest_relays(self._relay_entries, normalized)
         if not relays:
             raise RuntimeError(f"no relays available for #{normalized}")
-        await asyncio.gather(*(self._publish_to_relay(relay, event) for relay in relays))
+        results = await asyncio.gather(
+            *(self._publish_to_relay(relay, event) for relay in relays),
+            return_exceptions=True,
+        )
+        failures = [
+            f"{relay}: {result}"
+            for relay, result in zip(relays, results)
+            if isinstance(result, Exception)
+        ]
+        if len(failures) == len(relays):
+            detail = "; ".join(failures)
+            raise RuntimeError(f"failed to publish to any geohash relay: {detail}")
+        for failure in failures:
+            self.system_log(f"geo publish error {failure}")
         return event
 
     async def publish_presence(self, geohash: str) -> dict[str, object]:
@@ -571,6 +585,27 @@ class GeoChatDaemon:
             **self.network_config.websocket_proxy_argument(),
         ) as websocket:
             await websocket.send(json.dumps(["EVENT", event], separators=(",", ":")))
+            deadline = asyncio.get_running_loop().time() + _GEO_PUBLISH_ACK_TIMEOUT_SECONDS
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise RuntimeError("relay did not acknowledge event")
+                try:
+                    raw_message = await asyncio.wait_for(websocket.recv(), timeout=remaining)
+                except asyncio.TimeoutError as exc:
+                    raise RuntimeError("relay did not acknowledge event") from exc
+                try:
+                    message = json.loads(raw_message)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(message, list) or len(message) < 4 or message[0] != "OK":
+                    continue
+                if str(message[1]) != str(event["id"]):
+                    continue
+                if bool(message[2]):
+                    return
+                reason = str(message[3] or "relay rejected event")
+                raise RuntimeError(reason)
 
     async def _watch_loop(self, relay_url: str, geohash: str) -> None:
         subscription_id = f"geo-{geohash}"

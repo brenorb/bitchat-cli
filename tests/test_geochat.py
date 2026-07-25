@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pytest
+
 from bitchat_cli import geochat
 from websockets.asyncio.server import serve
 
@@ -179,6 +181,7 @@ def test_geochat_daemon_subscribes_and_publishes_against_local_relay() -> None:
                 return
             if message[0] == "EVENT":
                 published.append(message[1])
+                await websocket.send(json.dumps(["OK", message[1]["id"], True, "accepted"]))
 
         async with serve(handler, "127.0.0.1", 0) as server:
             port = server.sockets[0].getsockname()[1]
@@ -205,6 +208,35 @@ def test_geochat_daemon_subscribes_and_publishes_against_local_relay() -> None:
                     geochat.closest_relays = original_closest_relays  # type: ignore[assignment]
 
         assert published and published[0]["content"] == "outbound hello"
+
+    asyncio.run(exercise())
+
+
+def test_geochat_publish_rejects_relay_negative_ok() -> None:
+    async def exercise() -> None:
+        async def handler(websocket) -> None:
+            raw = await websocket.recv()
+            message = json.loads(raw)
+            assert message[0] == "EVENT"
+            await websocket.send(json.dumps(["OK", message[1]["id"], False, "blocked by relay"]))
+
+        async with serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            with TemporaryDirectory() as tmpdir:
+                original_closest_relays = geochat.closest_relays
+                daemon = geochat.GeoChatDaemon(
+                    relay_cache_path=Path(tmpdir) / "georelays.csv",
+                    seed_hex="56" * 32,
+                    nickname="local",
+                    on_message=lambda _event: None,
+                )
+                daemon._relay_entries = [geochat.GeoRelayEntry(host=f"127.0.0.1:{port}", lat=57.64911, lon=10.40744)]
+                geochat.closest_relays = lambda _entries, _geohash, count=5: [f"ws://127.0.0.1:{port}"]  # type: ignore[assignment]
+                try:
+                    with pytest.raises(RuntimeError, match="blocked by relay"):
+                        await daemon.publish("u4pruy", "rejected outbound")
+                finally:
+                    geochat.closest_relays = original_closest_relays  # type: ignore[assignment]
 
     asyncio.run(exercise())
 
