@@ -153,6 +153,25 @@ requires `--force` for block/building publication or background watching. The
 `geo lookup` command uses OpenStreetMap Nominatim over the configured network
 policy; it does not persist the query or returned coordinates.
 
+For a manual CLI-to-mobile geochat check, use the same geohash shown by the
+mobile client (or derive it from the same device coordinates) rather than an
+unrelated fixture geohash. The send commands report that an event was queued;
+that is not proof of relay publication or peer delivery. Confirm a public event
+with `geo inbox` and a geohash DM with `geo dm history` on the same geohash and
+peer:
+
+```bash
+GEOHASH="<mobile-client-geohash>"
+bitchat geo send "$GEOHASH" "manual interoperability test"
+bitchat geo inbox "$GEOHASH" --json
+bitchat geo dm send "$GEOHASH" @peer "manual geohash DM test"
+bitchat geo dm history "$GEOHASH" @peer --json
+```
+
+Treat an empty inbox or DM history as unconfirmed delivery. Do not retry a
+real-location publication until the exact geohash and test payload have been
+explicitly approved.
+
 ### Proxy policy
 
 Proxy configuration is shared by georelays, Nostr DMs, location notes, and place
