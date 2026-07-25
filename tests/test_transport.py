@@ -795,6 +795,38 @@ def test_transport_start_stop_controls_peripheral_endpoint() -> None:
     asyncio.run(case())
 
 
+def test_periodic_announce_refreshes_presence_and_stops_with_transport() -> None:
+    async def case() -> None:
+        endpoint = FakePeripheralEndpoint()
+        endpoint.subscriber_count = lambda: 1  # type: ignore[method-assign]
+        transport = _make_transport(
+            identity=Identity.generate(),
+            nickname="local",
+            private_messages=[],
+            receipts=[],
+            peripheral_endpoint=endpoint,
+        )
+        captured: list[Packet] = []
+
+        async def fake_broadcast(packet: Packet, *, exclude_addresses=None) -> None:
+            captured.append(packet)
+
+        transport._broadcast_packet = fake_broadcast  # type: ignore[method-assign]
+        original_interval = transport_module._ANNOUNCE_INTERVAL_SECONDS
+        transport_module._ANNOUNCE_INTERVAL_SECONDS = 0.01
+        try:
+            await transport.start()
+            await asyncio.sleep(0.03)
+            assert any(packet.packet_type == MessageType.ANNOUNCE for packet in captured)
+        finally:
+            await transport.stop()
+            transport_module._ANNOUNCE_INTERVAL_SECONDS = original_interval
+
+        assert transport._announce_task is None
+
+    asyncio.run(case())
+
+
 def test_public_broadcast_reaches_peripheral_subscribers() -> None:
     async def case() -> None:
         endpoint = FakePeripheralEndpoint()

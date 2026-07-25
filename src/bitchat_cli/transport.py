@@ -52,6 +52,7 @@ _NOTIFICATION_WORKER_COUNT = 1
 _MAX_CONNECT_QUEUE_SIZE = 64
 _CONNECT_WORKER_COUNT = 2
 _RUNTIME_PRUNE_INTERVAL_SECONDS = 30.0
+_ANNOUNCE_INTERVAL_SECONDS = 30.0
 _STALE_PEER_RETENTION_SECONDS = 900.0
 _STALE_RECONNECT_RETENTION_SECONDS = 300.0
 _MAX_FUTURE_TIMESTAMP_SKEW_SECONDS = 120.0
@@ -132,6 +133,7 @@ class BLEChatTransport:
         self._sync_public_file_transfers: dict[str, Packet] = {}
         self._request_sync_manager = RequestSyncManager()
         self._scan_task: asyncio.Task[None] | None = None
+        self._announce_task: asyncio.Task[None] | None = None
         self._connect_queue: asyncio.Queue[object] | None = None
         self._connect_workers: list[asyncio.Task[None]] = []
         self._queued_connect_addresses: set[str] = set()
@@ -158,6 +160,7 @@ class BLEChatTransport:
             asyncio.create_task(self._notification_worker())
             for _ in range(_NOTIFICATION_WORKER_COUNT)
         ]
+        self._announce_task = asyncio.create_task(self._announce_loop())
         self._scanner = BleakScanner(
             detection_callback=self._handle_discovered_device,
             service_uuids=[SERVICE_UUID],
@@ -176,6 +179,14 @@ class BLEChatTransport:
                 await self._scan_task
             except asyncio.CancelledError:
                 pass
+            self._scan_task = None
+        if self._announce_task is not None:
+            self._announce_task.cancel()
+            try:
+                await self._announce_task
+            except asyncio.CancelledError:
+                pass
+            self._announce_task = None
         connect_workers = list(self._connect_workers)
         self._connect_workers.clear()
         for worker in connect_workers:
@@ -349,6 +360,26 @@ class BLEChatTransport:
             raise
         except Exception as exc:
             self.system_log(f"Scan loop failed: {exc}")
+
+    async def _announce_loop(self) -> None:
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(),
+                        timeout=_ANNOUNCE_INTERVAL_SECONDS,
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    if not self.clients and self.peripheral_endpoint.subscriber_count() == 0:
+                        continue
+                    packet = self._make_announce_packet()
+                    self._remember_sync_packet(packet)
+                    await self._broadcast_packet(packet)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.system_log(f"Announce loop failed: {exc}")
 
     async def _set_scanning(self, enabled: bool) -> None:
         if self._scanner is None:
