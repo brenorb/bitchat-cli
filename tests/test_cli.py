@@ -1,6 +1,34 @@
 from __future__ import annotations
 
+import argparse
+import contextlib
+import io
+
+import pytest
+
 from bitchat_cli import app, cli
+
+
+def _parser_paths(parser: argparse.ArgumentParser, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+    paths = [prefix]
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for name, subparser in sorted(action.choices.items()):
+                paths.extend(_parser_paths(subparser, prefix + (name,)))
+    return paths
+
+
+def test_every_parser_path_supports_help() -> None:
+    parser = cli.build_parser()
+
+    for path in _parser_paths(parser):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with pytest.raises(SystemExit) as raised:
+                parser.parse_args([*path, "--help"])
+
+        assert raised.value.code == 0, "help failed for " + " ".join(path or ("<root>",))
+        assert output.getvalue()
 
 
 def test_mesh_send_parser_routes_to_public_send_handler() -> None:
