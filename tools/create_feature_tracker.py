@@ -7,7 +7,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT = ROOT / "bitchat-cli-feature-tracker.xlsx"
+OUTPUT = ROOT / "docs" / "audit" / "feature-tracker.xlsx"
 
 
 ROWS = [
@@ -146,6 +146,7 @@ def build() -> None:
         for cell in row:
             cell.alignment = Alignment(vertical="top", wrap_text=True)
 
+    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     wb.save(OUTPUT)
     print(OUTPUT)
 
