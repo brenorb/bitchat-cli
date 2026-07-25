@@ -2417,7 +2417,8 @@ def run_geo_dm_history(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(str(exc))
         return 1
-    conversation_id = f"{geohash}:{participant['peer_id']}"
+    participant_key = str(participant.get("nostr_pubkey_hex") or participant["peer_id"])
+    conversation_id = f"{geohash}:{participant_key}"
     rows = [
         row
         for row in MessageStore(runtime.inbox_path).read_all(deduplicate=True)
