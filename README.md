@@ -243,11 +243,6 @@ uv run bitchat selftest
 uv run bitchat --help
 ```
 
-The repository's manual feature matrix is
-[`bitchat-cli-feature-tracker.xlsx`](bitchat-cli-feature-tracker.xlsx). It records
-the Android↔CLI validation, the presence-heartbeat fix, and remaining external
-or configuration-dependent cases without treating them as automated coverage.
-
 ## References
 
 This client follows the public protocol behavior of the official projects:
