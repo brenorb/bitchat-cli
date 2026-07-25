@@ -1,254 +1,256 @@
-# bitchat
+# bitchat CLI
 
-`bitchat` is a clean-room Python CLI for BitChat public chat over Bluetooth LE.
+`bitchat` is a Python command-line client for the BitChat protocol. It combines
+local Bluetooth LE mesh chat with location-scoped Nostr channels, while keeping
+the two transports explicit in the command surface:
 
-Current scope:
+- `#mesh` uses Bluetooth LE. It works without the internet, relays signed public
+  packets through nearby peers, and supports Noise-encrypted DMs, receipts,
+  files, and public sync after reconnect.
+- Geohash channels use Nostr relays. They provide internet-backed location
+  channels, coarse presence, optional PoW, teleport markers, location notes, and
+  geohash-scoped DMs.
 
-- `#mesh` as the CLI's explicit public conversation surface
-- Location geohash channels over Nostr, with deterministic per-geohash identities
-- Real BitChat mainnet BLE UUIDs
-- Official announce packet format
-- Announce packets include current direct-neighbor hints from live connected peers
-- Official packet signing and peer ID derivation
-- Public broadcast chat with persistent local identity
-- Central-role BLE transport using `bleak`
-- macOS BLE peripheral advertising and subscriber writes for app-to-CLI reachability
-- Inbound fragment reassembly and outbound packet fragmentation for oversized BLE payloads
-- Direct BLE private messaging over Noise XX with lazy handshake
-- Public and DM file/image transfer with inbound persistence under `~/.config/bitchat/{files,images}/incoming`
-- Official Noise XX session primitives validated against the macOS app's test vectors
-- Duplicate-safe multi-hop relay for public traffic and directed Noise packets
-- Local public-message, fragment, and public file-transfer sync over `REQUEST_SYNC` with official-style `RSR` responses
-- Private-message history capture plus `dm inbox` / `dm history`
-- Linked-peer Nostr DM fallback for offline text/receipt delivery
-- Geohash-scoped Nostr DMs for watched or selected geohash identities
-- Persistent location notes over Nostr for building-level geohashes
-- Local geohash channel metadata for names, notes, bookmarks, selected context, and teleport hints
-- CLI-native social trust commands for linking, favoriting, blocking, fingerprint inspection, and verified state
-- Offline DM queueing for known peers until the BLE route comes back
-- Local Android-style named topic channel metadata for password / retention tracking
-- Proxy-aware network policy for geohash relay traffic, lookup, and Nostr fallback
-- Offline geohash discovery helpers for region/province/city/neighborhood/block/building derivation
-- Offline protocol self-tests
+Private text DMs prefer a live BLE link. A linked and favorited peer may also
+receive text DMs and receipts through the Nostr fallback when no live BLE route
+exists. File fallback over Nostr is not implemented.
 
-Still not implemented:
+> **Work in progress:** this client has not received an independent security
+> review. Do not use it for sensitive communications until its cryptography,
+> protocol interoperability, and operational behavior have been reviewed for
+> your use case.
 
-- Nostr fallback for files
+## Install and first run
 
-## Quick start
+Requirements:
+
+- Python 3.11 or newer
+- [`uv`](https://docs.astral.sh/uv/)
+- A Bluetooth LE adapter for mesh features
+- macOS for the optional BLE peripheral endpoint used by iOS/Android clients
+
+From a checkout:
 
 ```bash
 uv sync
 uv run bitchat doctor
-uv run bitchat chat --nickname breno
+uv run bitchat selftest
 ```
 
-## Global install
-
-Install the published package with `uv`, then invoke it directly as `bitchat`:
+To install the checkout as a user tool:
 
 ```bash
-uv tool install bitchat4agents
+uv tool install .
 bitchat doctor
 ```
 
-Inside chat:
+`doctor --json` is the fastest way to see the generated identity, state paths,
+daemon status, proxy status, and which capabilities are available on the current
+machine. The central BLE transport uses `bleak`; the macOS peripheral endpoint
+is enabled only when CoreBluetooth, Foundation, and the PyObjC bridge are
+available.
 
-- `/help`
-- `/name <nickname>`
-- `/who`
-- `/msg <@nickname|peer_id> <message>`
-- `/clear`
-- `/quit`
+## Common workflows
 
-Any non-slash input is sent as a public BitChat message.
-
-## Background listener
-
-Run the receiver in the background so inbound messages are recorded even when no
-interactive chat is open:
+Start the background listener once, then use the short-lived commands below:
 
 ```bash
 uv run bitchat daemon start --nickname breno
 uv run bitchat daemon status
-uv run bitchat network proxy set tor --policy require
-uv run bitchat network proxy status
-uv run bitchat send "hello from daemon"
-uv run bitchat mesh send "hello #mesh"
-uv run bitchat geo watch add u4pruy
-uv run bitchat geo send u4pruy "hello #u4pruy"
-uv run bitchat geo levels u4pruydqq
-uv run bitchat geo encode --lat 37.7749 --lon -122.4194 --all-levels
-uv run bitchat geo decode u4pruyd
-uv run bitchat geo lookup "Union Square, San Francisco"
-uv run bitchat geo send u4pruy --pow 12 "hello with PoW"
-uv run bitchat geo send u4pruy --teleport "hello from a teleported channel"
-uv run bitchat geo inbox u4pruy --tail 20
-uv run bitchat geo who u4pruy
-uv run bitchat geo channel set u4pruy --name "Home" --bookmark --select
-uv run bitchat geo channel show u4pruy
-uv run bitchat geo notes add u4pruydq "quiet after 9pm"
-uv run bitchat geo notes list u4pruydq
-uv run bitchat geo participant show u4pruy <pubkey>
-uv run bitchat geo participant block u4pruy <pubkey>
-uv run bitchat geo dm send u4pruy <pubkey> "hello from geo dm"
-uv run bitchat geo dm history u4pruy <pubkey>
-uv run bitchat peers
-uv run bitchat social link @bubbles <npub>
-uv run bitchat social favorite @bubbles
-uv run bitchat social fingerprint @bubbles
-uv run bitchat social verify @bubbles
-uv run bitchat inbox --tail 20
+
+# Public Bluetooth mesh chat
+uv run bitchat mesh send "hello from #mesh"
 uv run bitchat mesh inbox --tail 20
-uv run bitchat dm send @bubbles "hello from daemon"
-uv run bitchat topic join btc --password secret --retain
-uv run bitchat topic list
-uv run bitchat send-file ./photo.jpg
-uv run bitchat mesh send-file ./photo.jpg
-uv run bitchat dm send-file @bubbles ./photo.jpg
-uv run bitchat dm inbox
+uv run bitchat peers
+
+# Private text and file transfer
+uv run bitchat dm send @bubbles "hello privately"
 uv run bitchat dm history @bubbles
+uv run bitchat dm send-file @bubbles ./photo.jpg
+
+# Location channels: derive a geohash offline, then opt into a watch
+uv run bitchat geo encode --lat 38.7223 --lon -9.1393 --all-levels
+uv run bitchat geo watch add eycs2
+uv run bitchat geo send eycs2 "hello from the city channel"
+uv run bitchat geo inbox eycs2 --tail 20
+uv run bitchat geo who eycs2
+
 uv run bitchat daemon stop
 ```
 
-Daemon artifacts live under `~/.config/bitchat/`:
+The full command tree and flags are in [`docs/cli-reference.md`](docs/cli-reference.md).
+Every visible command supports `--help` at its level, for example:
 
-- `daemon.log` - background listener log
-- `daemon.sock` - local control socket for `dm send` and read-receipt commands
-- `messages.jsonl` - recorded message history
-- `peers.json` - known peers learned from signed announce packets, keeping the
-  latest observed address set per peer instead of a growing historical archive
-- `social.json` - explicit Nostr/social mappings and trust flags
-- `files/incoming` - inbound non-image transfers
-- `images/incoming` - inbound image transfers
-- `daemon.pid` - running daemon pid
-- `radio.pid` - active BLE session guard
+```bash
+bitchat --help
+bitchat geo --help
+bitchat geo send --help
+```
 
-Behavior notes:
+Read/status commands that expose `--json` are intended for scripts. State-changing
+commands print a short confirmation and return a non-zero status when validation
+or delivery setup fails.
 
-- The daemon now follows the macOS app's basic scanning shape: duty-cycled
-  background scanning instead of a tight `discover()` loop, with longer idle
-  and connected off-windows to reduce background Bluetooth churn.
-- When the daemon has no live peers yet, it now keeps scanning continuously for
-  a short discovery grace window before falling back to longer off-windows, and
-  active peripheral subscribers count as live peers for that backoff policy.
-- `messages.jsonl` now suppresses repeated writes for the same stable
-  `message_id`, so sync replay after reconnect or restart does not re-persist
-  already recorded public packets, and `inbox` stays deduplicated too.
-- `daemon stop` now waits briefly for a clean shutdown and lease cleanup, so an
-  immediate `daemon start` is less likely to trip over stale `daemon.pid` or
-  `radio.pid` state.
-- `daemon status` now asks the live daemon for runtime details when the control
-  socket is available, including whether peripheral advertising is active, how
-  many peripheral subscribers are attached, and which subscriber BLE addresses
-  are currently attached. It also shows a short bounded history of recent
-  peripheral subscribe/unsubscribe/write events to make phone-to-daemon testing
-  debuggable without catching the exact moment live.
-- `geo watch add/remove/list` manages the geohash channels the daemon keeps
-  subscribed in the background, so location-channel messages can arrive while
-  no interactive client is open.
-- `geo channel set/show/list` stores local channel metadata the mobile sheets
-  expose visually: friendly names, bookmarks, private notes, one selected
-  context, and a saved teleport hint.
-- `geo notes add/list` publishes and fetches persistent Nostr kind `1` location
-  notes for building-level geohashes (8 characters), matching the app's
-  location-note concept in a CLI command surface.
-- `geo participant show/block/unblock` overlays trust state onto Nostr geohash
-  participants, and `geo who` now annotates favorite / blocked / verified flags.
-- `geo dm send/history` uses per-geohash Nostr identities and no-recipient
-  embedded BitChat payloads, so the CLI can interoperate with the mobile apps'
-  geohash-scoped direct messages.
-- `network proxy ...` sets one privacy policy for every remote path in the CLI
-  instead of sprinkling ad hoc proxy flags across commands. `--policy require`
-  is the fail-closed mode when you care more about privacy than convenience.
-- Watched geohashes with precision `<= 5` now emit periodic kind `20001`
-  presence heartbeats in the background, matching the official app's
-  coarse-location presence model.
-- `geo levels`, `geo encode`, and `geo decode` are fully offline; `geo lookup`
-  is the only place-name flow that may touch a third-party service, and it
-  does not persist queries or returned coordinates.
-- Upstream-compatible geohash naming in the CLI now maps:
-  region=`2`, province=`4`, city=`5`, neighborhood=`6`, block=`7`,
-  building=`8`.
-- `geo send` and `geo watch add` now warn before publishing or following
-  high-precision geohashes, and block/building precision requires `--force`.
-- `geo send <geohash> ...` publishes a real kind `20000` geohash-scoped Nostr
-  event, signed with the same deterministic HMAC-derived per-geohash identity
-  shape the macOS app uses.
-- `geo send <geohash> --pow <bits> ...` also mines the same NIP-13-style
-  `["nonce", value, difficulty]` tag the Android app expects when geohash PoW
-  is enabled. The CLI defaults to `--pow 0`, matching the official app's
-  default of leaving PoW disabled.
-- `geo send <geohash> --teleport ...` adds the same `["t","teleport"]` tag the
-  official apps use for manually teleported geohash messages.
-- The daemon caches the official `permissionlesstech/georelays` CSV locally and
-  picks the closest relays to the target geohash center, matching the app's
-  geohash relay selection model at a smaller implementation scope.
-- Geohash inbound events are deduplicated by Nostr event ID before persistence,
-  so the same relay fanout no longer appears repeated in `geo inbox`.
-- `inbox` is the `#mesh` view for the BLE public conversation, and `mesh send`
-  / `mesh inbox` expose that same scope explicitly in the CLI.
-- `geo inbox <geohash>` is the inbound view for one location channel and now
-  shows PoW / teleport markers when the event carries them.
-- `geo who <geohash>` lists recently seen participants from geohash messages and
-  presence heartbeats, excluding the CLI's own derived geohash identity.
-- The macOS peripheral endpoint now exposes the same BLE characteristic surface
-  the official app does for inbound writes: notify, read, write, and
-  write-without-response.
-- Inbound peripheral writes are now reassembled across offset-based CoreBluetooth
-  write requests before packet decode, which matches the official app's long
-  write behavior without growing an unbounded buffer.
-- `send` queues a public channel message through the running daemon, so you can
-  test outbound delivery without stopping the background listener to open
-  interactive `chat`.
-- `send-file`, `mesh send-file`, and `dm send-file` use the official file TLV
-  shape and persist inbound transfers with attachment metadata so `inbox`,
-  `dm inbox`, and `dm history` can render them as files instead of raw paths.
-- The transport relays signed public packets, oversized packet fragments, and
-  directed Noise handshakes/encrypted payloads across connected peers with TTL
-  decrement and loop suppression.
-- Direct DM traffic uses one active BLE link per peer instead of writing the
-  same packet to every historical address we have seen for that peer.
-- The daemon now processes inbound BLE notifications through a bounded worker
-  queue instead of spawning an unbounded task per packet.
-- Long-lived daemon state is pruned periodically so stale reconnect timers,
-  dead peer links, and orphaned DM session state do not accumulate forever.
-- Stale public broadcasts / announces and obviously future-skewed packets are
-  dropped early instead of consuming relay or session work.
-- BLE discovery now feeds a bounded connect queue instead of spawning an
-  unbounded connect task per discovered device.
-- Failed or short-lived BLE links now back off exponentially instead of
-  retrying at a near-constant background cadence.
-- Newly seen direct peers get a local-only sync request covering announces,
-  public messages, oversized-packet fragments, and public file transfers, and
-  the CLI can answer `REQUEST_SYNC` packets from those caches while marking
-  solicited replay packets with the official `RSR` wire flag.
-- This matches the Apple app's current scope for replayed public file
-  transfers; private file transfers still remain live-only because they travel
-  inside Noise-encrypted DM packets instead of the public gossip sync cache.
-- The CLI validates `RSR` catch-up packets against the peer that answered the
-  sync request, including replayed public messages originally authored by this
-  device.
-- The sync cache includes the CLI's own current announce, and reconnecting
-  direct peers get a fresh public sync request.
-- Private messages are persisted separately from the public inbox and exposed
-  through `bitchat dm inbox` and `bitchat dm history`.
-- `social link` + `social favorite` authorize Nostr DM fallback for one peer.
-  BLE stays first; if the daemon has no live BitChat link for that peer, text
-  DMs and read/delivery receipts can fall back to NIP-17 gift-wrapped Nostr
-  messages using the linked `npub`.
-- `social verify` marks a peer verified locally, and `social fingerprint` now
-  prints a signed verification payload you can paste into another CLI for an
-  out-of-band check before trusting that identity.
-- `dm send` now queues text DMs for known-but-offline BLE peers instead of
-  failing immediately, reusing the transport's pending Noise payload queue
-  until the peer reconnects.
-- `topic join/list/leave/password/retain` exposes the Android-only named
-  channel metadata as a local CLI surface without expanding the public mesh
-  transport model beyond `#mesh` plus geohashes.
-- Only one CLI BLE session can own the radio at a time, so `chat` and `daemon`
-  no longer run concurrently.
+## Transport and privacy model
 
-## Notes
+### Bluetooth mesh
 
-This implementation is intentionally narrow. It aims to interoperate with the official apps for signed public chat across Bluetooth mesh and geohash/Nostr channels without claiming full protocol coverage.
+The `mesh` commands address the public `#mesh` conversation. The daemon acts as
+a BLE central and, on supported macOS installations, also advertises the
+BitChat peripheral service so a phone can connect to it. Public packets are
+signed, relayed with a bounded TTL, deduplicated, and fragmented when they do
+not fit in one BLE write. A reconnecting peer can request cached public packets
+and public files; private packets remain live-only because they are inside the
+Noise session.
+
+Only one CLI BLE session can own the radio at a time. Stop `chat` before starting
+`daemon`, or stop `daemon` before opening `chat`.
+
+### Interactive chat
+
+`bitchat chat --nickname NAME` opens the public `#mesh` client. The interactive
+commands are:
+
+```text
+/help
+/name <nickname>
+/who
+/msg <@nickname|peer_id> <message>
+/clear
+/quit
+```
+
+Non-slash input is sent as a public `#mesh` message. The interactive client and
+the background daemon share the same persistent identity and state directory.
+
+### Nostr geochat
+
+Geohash operations other than `geo lookup` are driven by the daemon and Nostr
+relays. The CLI derives the same hierarchy used by the official apps:
+
+| Level | Precision | Typical scope |
+| --- | ---: | --- |
+| `region` | 2 | country / large region |
+| `province` | 4 | state / province |
+| `city` | 5 | city |
+| `neighborhood` | 6 | neighborhood |
+| `block` | 7 | city block |
+| `building` | 8 | building-level area |
+
+Use `geo levels`, `geo encode`, and `geo decode` for offline discovery. A
+`geo watch add` subscription keeps the daemon listening for the channel and,
+for precision 5 or less, emits coarse presence heartbeats. `geo send` publishes
+kind `20000` events; `--pow N` mines the matching NIP-13 nonce tag and
+`--teleport` adds the official teleport tag.
+
+A geohash is location information. The CLI warns at neighborhood precision and
+requires `--force` for block/building publication or background watching. The
+`geo lookup` command uses OpenStreetMap Nominatim over the configured network
+policy; it does not persist the query or returned coordinates.
+
+### Proxy policy
+
+Proxy configuration is shared by georelays, Nostr DMs, location notes, and place
+lookup:
+
+```bash
+bitchat network proxy status --json
+bitchat network proxy set system --policy prefer
+bitchat network proxy set tor --policy require
+bitchat network proxy set socks5h://127.0.0.1:9050 --policy require
+bitchat network proxy test --json
+bitchat network proxy disable
+```
+
+`prefer` allows a direct route when the selected proxy is unavailable. `require`
+fails closed when the proxy mode is disabled or cannot be used. `tor` checks the
+common local Tor ports (`39050`, `9050`, and `9150`) and stores the first live
+one; a custom URL can be supplied directly. Proxy targets shown by status are
+redacted to avoid printing credentials.
+
+### Social trust and Nostr DM fallback
+
+Nostr fallback is opt-in per peer. Link the peer to its Nostr identity, then
+favorite it:
+
+```bash
+bitchat social link @bubbles <npub>
+bitchat social favorite @bubbles
+bitchat dm send @bubbles "BLE-independent text"
+```
+
+Blocking or unfavoriting disables fallback. `social fingerprint` prints the
+peer's Noise/signing material and a verification payload; use `social verify
+PEER --payload 'bitchat://verify?...'` when checking an out-of-band payload.
+Without `--payload`, `social verify PEER` records a local verified state but does
+not prove that a human checked the identity.
+
+## Local state and artifacts
+
+The CLI stores persistent state under `~/.config/bitchat/` by default. For
+backward compatibility, an existing `~/.config/bitchat-cli/` directory is reused
+when it contains prior BitChat artifacts and the preferred directory does not.
+There is currently no environment-variable override for this path; use
+`bitchat doctor --json` to see the active path.
+
+Typical artifacts are:
+
+| Path | Purpose |
+| --- | --- |
+| `state.json` | local identity, Nostr keys/relays, proxy policy, watches, geohash metadata, and topic metadata |
+| `daemon.log` | background listener and transport diagnostics |
+| `daemon.sock` | local control socket used by short-lived send/query commands |
+| `daemon.pid` / `radio.pid` | daemon and BLE-session leases |
+| `messages.jsonl` | deduplicated public, geohash, DM, receipt, and attachment history |
+| `peers.json` | signed announce records and the latest observed addresses |
+| `social.json` | explicit peer/Nostr links, favorites, blocks, and verification state |
+| `georelays_cache.csv` | cached geohash relay directory |
+| `files/incoming/` | received non-image files |
+| `images/incoming/` | received image files |
+
+The `topic` commands update only local Android-style channel metadata. They do
+not create an additional public transport or join a remote topic on the mesh.
+
+## Scope and known limitations
+
+- The client targets the public `#mesh` protocol plus geohash/Nostr features; it
+  does not claim full feature parity with either official app.
+- Nostr fallback currently covers text DMs and delivery/read receipts, not file
+  transfers.
+- Cross-platform BLE interoperability is the best-tested private path. Nostr
+  fallback additionally depends on the other client having the matching Nostr
+  identity and DM subscription enabled; the Android 1.7.4 manual run did not
+  surface a fallback DM even after mutual favoriting.
+- Public sync covers announces, public messages, fragments, and public file
+  transfers. Private messages and private files are not replayed by public sync.
+- Location notes require an 8-character building geohash and publish kind `1`
+  events to public relays. Treat both the geohash and note text as public data.
+- `geo lookup` is the only command that sends a free-form place query to a
+  third-party HTTP service. Use `network proxy ... --policy require` when the
+  privacy boundary requires fail-closed behavior.
+
+## Development and verification
+
+```bash
+uv sync
+uv run pytest
+uv run bitchat selftest
+uv run bitchat --help
+```
+
+The repository's manual feature matrix is
+[`bitchat-cli-feature-tracker.xlsx`](bitchat-cli-feature-tracker.xlsx). It records
+the Android↔CLI validation, the presence-heartbeat fix, and remaining external
+or configuration-dependent cases without treating them as automated coverage.
+
+## References
+
+This client follows the public protocol behavior of the official projects:
+
+- [BitChat for iOS/macOS](https://github.com/permissionlesstech/bitchat)
+- [BitChat for Android](https://github.com/permissionlesstech/bitchat-android)
+- [BitChat georelay directory](https://github.com/permissionlesstech/georelays)
+
+The implementation is intentionally narrow and aims to make its limits visible:
+read the source and run `doctor`, `selftest`, and the relevant `--help` output
+before relying on a feature.
