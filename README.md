@@ -34,7 +34,27 @@ Requirements:
 - A Bluetooth LE adapter for mesh features
 - macOS for the optional BLE peripheral endpoint used by iOS/Android clients
 
-From a checkout:
+### Install the published package
+
+The released package is published on PyPI as `bitchat4agents` and installs the
+`bitchat` and `bchat` commands:
+
+```bash
+uv tool install bitchat4agents
+bitchat doctor
+```
+
+If `uv` is not installed, Homebrew provides it on macOS and Linux:
+
+```bash
+brew install uv
+uv tool install bitchat4agents
+```
+
+There is currently no Homebrew formula for `bitchat` itself. Homebrew is only
+used above to install the `uv` package manager.
+
+### Install from a checkout
 
 ```bash
 uv sync
@@ -56,7 +76,6 @@ is enabled only when CoreBluetooth, Foundation, and the PyObjC bridge are
 available.
 
 ## Common workflows
-
 Start the background listener once, then use the short-lived commands below:
 
 ```bash
