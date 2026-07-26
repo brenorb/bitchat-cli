@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import json
+
+import pytest
+from websockets.asyncio.server import serve
+
 from bitchat_cli.nostr import (
     NostrIdentity,
+    NostrDMClient,
+    NostrError,
     create_private_message_event,
     decode_bitchat_payload,
     decode_npub,
@@ -9,6 +17,7 @@ from bitchat_cli.nostr import (
     encode_bitchat_private_message,
     encode_bitchat_private_message_no_recipient,
 )
+from bitchat_cli.network import NetworkConfig
 
 
 def test_npub_round_trip_from_private_key() -> None:
@@ -73,3 +82,32 @@ def test_embedded_bitchat_private_message_without_recipient_round_trip() -> None
     assert decoded.message_kind == "private_message"
     assert decoded.message_id == "m-geo-1"
     assert decoded.content == "hello geo fallback"
+
+
+def test_nostr_publish_rejects_relay_negative_ok() -> None:
+    async def exercise() -> None:
+        async def handler(websocket) -> None:
+            raw = await websocket.recv()
+            message = json.loads(raw)
+            assert message[0] == "EVENT"
+            await websocket.send(json.dumps(["OK", message[1]["id"], False, "blocked by relay"]))
+
+        async with serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            sender = NostrIdentity.from_private_key_hex("14" * 32)
+            recipient = NostrIdentity.from_private_key_hex("15" * 32)
+            client = NostrDMClient(
+                identity=sender,
+                relay_urls=[f"ws://127.0.0.1:{port}"],
+                network_config=NetworkConfig(proxy_mode="disabled", proxy_url=None, proxy_policy="prefer"),
+                on_message=lambda _message: None,
+            )
+            event = create_private_message_event(
+                content="payload",
+                recipient_pubkey_hex=recipient.public_key_hex,
+                sender_identity=sender,
+            )
+            with pytest.raises(NostrError, match="blocked by relay"):
+                await client._publish_event(event)
+
+    asyncio.run(exercise())

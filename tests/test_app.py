@@ -790,6 +790,36 @@ def test_run_geo_dm_history_filters_one_geohash_conversation(tmp_path: Path, mon
     assert "hello geo dm" in captured.out
 
 
+def test_run_geo_dm_history_uses_nostr_identity_for_social_nickname(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    app._social_store(runtime).upsert(
+        peer_id="33" * 8,
+        nickname="anon4708",
+        nostr_pubkey_hex="44" * 32,
+    )
+    store = MessageStore(runtime.inbox_path)
+    store.append(
+        direction="outbound",
+        sender="clanker",
+        content="geo dm sent by nickname",
+        timestamp=datetime(2026, 6, 24, 12, 0, 0, tzinfo=timezone.utc),
+        peer_id="44" * 32,
+        message_id="geo-dm-nostr-1",
+        scope="geo_dm",
+        conversation_id=f"u4pruy:{'44' * 32}",
+        message_kind="private_message",
+    )
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+
+    exit_code = app.run_geo_dm_history(
+        argparse.Namespace(geohash="#u4pruy", target="@anon4708", json=False, tail=None)
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "geo dm sent by nickname" in captured.out
+
+
 def test_run_geo_notes_list_renders_fetched_notes(tmp_path: Path, monkeypatch, capsys) -> None:
     runtime = RuntimePaths(tmp_path)
     state = app.StateStore(runtime.state_path).load()

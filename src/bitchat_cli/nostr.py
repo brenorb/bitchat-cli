@@ -25,6 +25,7 @@ _BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 _BECH32_GENERATOR = [0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3]
 _READ_ACK_THROTTLE_SECONDS = 0.35
 _LOOKBACK_SECONDS = 48 * 60 * 60
+_NOSTR_PUBLISH_ACK_TIMEOUT_SECONDS = 10.0
 
 
 class NostrError(RuntimeError):
@@ -427,6 +428,7 @@ class NostrDMClient:
             raise NostrError("no Nostr relays configured")
         payload = json.dumps(["EVENT", event.to_dict()], separators=(",", ":"))
         successes = 0
+        failures: list[str] = []
         for relay_url in self.relay_urls:
             try:
                 async with ws_connect(
@@ -437,11 +439,36 @@ class NostrDMClient:
                     **self.network_config.websocket_proxy_argument(),
                 ) as websocket:
                     await websocket.send(payload)
+                    await self._wait_for_publish_ack(websocket, event.id)
                     successes += 1
             except Exception as exc:
+                failures.append(f"{relay_url}: {exc}")
                 self.system_log(f"nostr publish error {relay_url}: {exc}")
         if successes == 0:
-            raise NostrError("failed to publish to any Nostr relay")
+            detail = "; ".join(failures)
+            raise NostrError(f"failed to publish to any Nostr relay: {detail}")
+
+    async def _wait_for_publish_ack(self, websocket, event_id: str) -> None:
+        deadline = asyncio.get_running_loop().time() + _NOSTR_PUBLISH_ACK_TIMEOUT_SECONDS
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise NostrError("relay did not acknowledge event")
+            try:
+                raw_message = await asyncio.wait_for(websocket.recv(), timeout=remaining)
+            except asyncio.TimeoutError as exc:
+                raise NostrError("relay did not acknowledge event") from exc
+            try:
+                message = json.loads(raw_message)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(message, list) or len(message) < 4 or message[0] != "OK":
+                continue
+            if str(message[1]) != str(event_id):
+                continue
+            if bool(message[2]):
+                return
+            raise NostrError(str(message[3] or "relay rejected event"))
 
     async def _sync_watch_tasks(self) -> None:
         desired: dict[tuple[str, str], NostrIdentity] = {}
