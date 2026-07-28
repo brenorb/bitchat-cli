@@ -51,8 +51,12 @@ brew install uv
 uv tool install bitchat4agents
 ```
 
-There is currently no Homebrew formula for `bitchat` itself. Homebrew is only
-used above to install the `uv` package manager.
+Alternatively, install the CLI directly from the project's Homebrew tap:
+
+```bash
+brew install brenorb/tap/bitchat-cli
+bitchat doctor
+```
 
 ### Install from a checkout
 
@@ -79,7 +83,7 @@ available.
 Start the background listener once, then use the short-lived commands below:
 
 ```bash
-uv run bitchat daemon start --nickname breno
+uv run bitchat daemon start --nickname Alice
 uv run bitchat daemon status
 
 # Public Bluetooth mesh chat
@@ -88,9 +92,9 @@ uv run bitchat mesh inbox --tail 20
 uv run bitchat peers
 
 # Private text and file transfer
-uv run bitchat dm send @bubbles "hello privately"
-uv run bitchat dm history @bubbles
-uv run bitchat dm send-file @bubbles ./photo.jpg
+uv run bitchat dm send @anon0001 "hello privately"
+uv run bitchat dm history @anon0001
+uv run bitchat dm send-file @anon0001 ./photo.jpg
 
 # Location channels: derive a geohash offline, then opt into a watch
 uv run bitchat geo encode --lat 38.7223 --lon -9.1393 --all-levels
@@ -217,9 +221,9 @@ Nostr fallback is opt-in per peer. Link the peer to its Nostr identity, then
 favorite it:
 
 ```bash
-bitchat social link @bubbles <npub>
-bitchat social favorite @bubbles
-bitchat dm send @bubbles "BLE-independent text"
+bitchat social link @anon0001 <npub>
+bitchat social favorite @anon0001
+bitchat dm send @anon0001 "BLE-independent text"
 ```
 
 Blocking or unfavoriting disables fallback. `social fingerprint` prints the
