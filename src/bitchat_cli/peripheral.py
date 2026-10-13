@@ -5,8 +5,6 @@ import sys
 from collections import deque
 from typing import Callable, Protocol
 
-import libdispatch
-
 from .constants import MAX_PACKET_SIZE
 from .protocol import Packet
 
@@ -74,6 +72,7 @@ def peripheral_supported() -> bool:
     try:
         import CoreBluetooth  # noqa: F401
         import Foundation  # noqa: F401
+        import libdispatch  # noqa: F401
         import objc  # noqa: F401
     except ImportError:
         return False
@@ -167,6 +166,8 @@ def _delegate_class():
 
 
 def _create_dispatch_queue():
+    import libdispatch
+
     return libdispatch.dispatch_queue_create(b"bitchat.peripheral", None)
 
 

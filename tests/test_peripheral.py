@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+from types import SimpleNamespace
+
 import bitchat_cli.peripheral as peripheral_module
 from bitchat_cli.crypto import Identity
 from bitchat_cli.protocol import make_public_message_packet
@@ -14,12 +18,52 @@ def test_create_dispatch_queue_uses_bitchat_label(monkeypatch) -> None:
         seen["attr"] = attr
         return sentinel
 
-    monkeypatch.setattr(peripheral_module.libdispatch, "dispatch_queue_create", fake_dispatch_queue_create)
+    monkeypatch.setitem(
+        sys.modules,
+        "libdispatch",
+        SimpleNamespace(dispatch_queue_create=fake_dispatch_queue_create),
+    )
 
     queue = peripheral_module._create_dispatch_queue()
 
     assert queue is sentinel
     assert seen == {"label": b"bitchat.peripheral", "attr": None}
+
+
+def test_peripheral_import_and_fallback_without_macos_modules() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys
+sys.platform = "linux"
+sys.modules["libdispatch"] = None
+from bitchat_cli.peripheral import (
+    NullPeripheralEndpoint, create_peripheral_endpoint, peripheral_supported,
+)
+assert not peripheral_supported()
+endpoint = create_peripheral_endpoint(
+    service_uuid="service", characteristic_uuid="characteristic",
+    system_log=lambda *_: None, on_write=lambda *_: None,
+    on_subscribe=lambda *_: None, on_unsubscribe=lambda *_: None,
+)
+assert isinstance(endpoint, NullPeripheralEndpoint)
+""",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_peripheral_support_requires_dispatch_queue_module(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    for name in ("CoreBluetooth", "Foundation", "objc"):
+        monkeypatch.setitem(sys.modules, name, SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "libdispatch", None)
+
+    assert peripheral_module.peripheral_supported() is False
 
 
 def test_create_peripheral_manager_passes_dispatch_queue() -> None:
