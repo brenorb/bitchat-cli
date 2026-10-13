@@ -6,7 +6,11 @@ on:
       - "v*"
 
 jobs:
+  verify:
+    uses: ./.github/workflows/verify.yml
+
   publish:
+    needs: verify
     runs-on: ubuntu-latest
     environment:
       name: pypi

@@ -1476,7 +1476,7 @@ def test_request_sync_filter_suppresses_known_public_packets() -> None:
     asyncio.run(case())
 
 
-def test_request_sync_returns_missing_public_file_transfers() -> None:
+def test_request_sync_returns_missing_public_file_transfers(tmp_path: Path) -> None:
     async def case() -> None:
         local_identity = Identity.generate()
         alice_identity = Identity.generate()
@@ -1486,6 +1486,7 @@ def test_request_sync_returns_missing_public_file_transfers() -> None:
             nickname="local",
             private_messages=[],
             receipts=[],
+            file_runtime_paths=RuntimePaths(tmp_path),
         )
         _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="A1")
         _register_known_peer(transport, peer_identity=bob_identity, nickname="bob", address="B1")
@@ -1541,7 +1542,7 @@ def test_request_sync_returns_missing_public_file_transfers() -> None:
     asyncio.run(case())
 
 
-def test_request_sync_filter_suppresses_known_public_file_transfers() -> None:
+def test_request_sync_filter_suppresses_known_public_file_transfers(tmp_path: Path) -> None:
     async def case() -> None:
         local_identity = Identity.generate()
         alice_identity = Identity.generate()
@@ -1551,6 +1552,7 @@ def test_request_sync_filter_suppresses_known_public_file_transfers() -> None:
             nickname="local",
             private_messages=[],
             receipts=[],
+            file_runtime_paths=RuntimePaths(tmp_path),
         )
         _register_known_peer(transport, peer_identity=alice_identity, nickname="alice", address="A1")
         _register_known_peer(transport, peer_identity=bob_identity, nickname="bob", address="B1")

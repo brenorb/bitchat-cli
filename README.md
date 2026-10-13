@@ -301,3 +301,16 @@ This client follows the public protocol behavior of the official projects:
 The implementation is intentionally narrow and aims to make its limits visible:
 read the source and run `doctor`, `selftest`, and the relevant `--help` output
 before relying on a feature.
+
+## Verification
+
+```bash
+uv sync --no-config --locked --dev
+uv run --no-config --locked ruff check .
+uv run --no-config --locked pytest
+uv build --no-config
+```
+
+Pull requests and main pushes run these checks. Tag publication depends on the
+same reusable verification workflow. Tests use local relay fixtures and
+temporary file-transfer storage.
