@@ -196,7 +196,8 @@ class StateStore:
             if not isinstance(value, str) or len(value) != 64:
                 raise ValueError(f"{key} must be a 32-byte hexadecimal key")
             try:
-                bytes.fromhex(value)
+                if len(bytes.fromhex(value)) != 32:
+                    raise ValueError("invalid key length")
                 if key == "nostr_private_key":
                     PrivateKey.from_hex(value)
             except ValueError:

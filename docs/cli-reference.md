@@ -206,7 +206,11 @@ fall back to the default. Explicit XDG configuration does not migrate an old
 identity or daemon. `doctor` reports the effective paths. Newly created app
 directories use mode 0700; state saves replace the file atomically with mode
 0600 on POSIX. Existing directories keep their permissions. State contains
-private keys and local topic passwords; protect backups too.
+private keys and local topic passwords; protect backups too. Malformed JSON or
+invalid identity fields produce an error naming the file and leave it untouched.
+Restore a known-good backup or correct the file while preserving private keys;
+deleting state creates a different identity. Malformed daemon acknowledgements
+produce a concise error; inspect daemon status before retrying an uncertain send.
 
 `--help` describes the installed build. Documentation and support links are
 included in the top-level help. No analytics or update checks are added.

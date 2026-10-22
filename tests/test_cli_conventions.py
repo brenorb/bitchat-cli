@@ -201,3 +201,39 @@ def test_invalid_state_has_actionable_error_and_preserves_identity(tmp_path, con
         assert str(path) in result.stderr
         assert 'backup' in result.stderr
         assert path.read_text() == contents
+
+
+def test_cli_rejects_incomplete_real_daemon_acknowledgement():
+    import os
+    from pathlib import Path
+    import socket
+    import subprocess
+    import sys
+    import tempfile
+    import threading
+    with tempfile.TemporaryDirectory(prefix='bchat-', dir='/tmp') as directory:
+        root = Path(directory) / 'bitchat'
+        root.mkdir()
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(root / 'daemon.sock'))
+        server.listen(1)
+        server.settimeout(5)
+        def respond():
+            connection, _ = server.accept()
+            with connection:
+                connection.recv(4096)
+                connection.sendall(b'{"ok":true}\n')
+        worker = threading.Thread(target=respond)
+        worker.start()
+        try:
+            result = subprocess.run([sys.executable, '-m', 'bitchat_cli.cli', 'send-file', 'demo.txt'], env=dict(os.environ, XDG_CONFIG_HOME=directory), capture_output=True, text=True, timeout=10)
+        finally:
+            worker.join(6)
+            server.close()
+        assert not worker.is_alive()
+        assert result.returncode == 1
+        assert result.stdout == ''
+        assert 'Traceback' not in result.stderr
+        assert 'transfer_id' in result.stderr
+        assert 'daemon status' in result.stderr
+        assert 'already be queued' in result.stderr
