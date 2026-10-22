@@ -15,6 +15,7 @@ class DaemonClient:
             raise RuntimeError("daemon socket not found; start `bitchat daemon start` first")
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
+            client.settimeout(30.0)
             client.connect(str(self.runtime.daemon_socket_path))
             client.sendall((json.dumps(payload) + "\n").encode("utf-8"))
             response = b""
@@ -23,13 +24,22 @@ class DaemonClient:
                 if not chunk:
                     break
                 response += chunk
+        except TimeoutError as exc:
+            raise RuntimeError("daemon request timed out; inspect `bitchat daemon status` before retrying (a send may already be queued)") from exc
         except OSError as exc:
             raise RuntimeError(f"failed to talk to daemon: {exc}") from exc
         finally:
             client.close()
         if not response:
             raise RuntimeError("daemon returned no response")
-        decoded = json.loads(response.decode("utf-8"))
+        if not response.endswith(b"\n"):
+            raise RuntimeError("incomplete response from daemon; inspect `bitchat daemon status`")
+        try:
+            decoded = json.loads(response.decode("utf-8"))
+        except (ValueError, UnicodeError) as exc:
+            raise RuntimeError("invalid response from daemon; inspect `bitchat daemon status`") from exc
+        if not isinstance(decoded, dict):
+            raise RuntimeError("invalid response from daemon; expected a JSON object")
         if not decoded.get("ok", False):
             raise RuntimeError(str(decoded.get("error") or "daemon command failed"))
         return decoded
