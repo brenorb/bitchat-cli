@@ -79,6 +79,53 @@ machine. The central BLE transport uses `bleak`; the macOS peripheral endpoint
 is enabled only when CoreBluetooth, Foundation, and the PyObjC bridge are
 available.
 
+Daemon startup succeeds only after the command socket confirms that transport
+and relay initialization completed (up to 10 seconds). A failed startup exits 1
+with the log path and removes its runtime files. Starting an already running
+ready daemon succeeds without launching another process. A live cached PID
+without a ready socket returns an error and is preserved for inspection; it
+is never terminated by `daemon start`. Older daemons without the readiness
+field should be stopped and restarted after upgrading.
+
+## Help, scripts, and configuration
+
+Run `bitchat` for the command overview, `bitchat help geo` for a command group,
+or `bitchat geo send --help` for individual options. `-h` also works, and
+`bitchat --version` prints the installed package version. Help and version do
+not create identity files or contact Bluetooth or network services.
+
+Human-readable results use stdout; errors, warnings, and chat system logs use
+stderr. Read commands with `--json` produce JSON on stdout. Invalid arguments
+exit with status 2, operational failures with 1, and interrupted foreground
+commands with 130. Success and a consumer closing an output pipe return 0.
+`chat` requires an interactive terminal; scripts can use the daemon and the
+short-lived `send`/`inbox` commands instead.
+
+Pipe a message by passing `-` as its body, or keep a topic password out of the
+shell history and process arguments with `--password-stdin`:
+
+```bash
+printf 'hello from a pipeline\n' | bitchat mesh send -
+bitchat inbox --json | jq '.[].content'
+bitchat topic join friends --password-stdin < /path/to/password-file
+```
+
+`--password-stdin` accepts one nonempty line and never prompts on a terminal.
+Existing password arguments remain available, but can appear in shell history
+and process listings. `topic list --json` reports `password_set` without
+printing the password. Passwords and private identity keys remain local in
+`state.json`; new state files use owner-only permissions and atomic writes.
+
+Set an absolute `XDG_CONFIG_HOME` to put all app files in
+`$XDG_CONFIG_HOME/bitchat/`. Otherwise, the default is `~/.config/bitchat/`,
+with existing `~/.config/bitchat-cli/` state reused for compatibility. Empty or
+relative `XDG_CONFIG_HOME` values use the default. An explicit XDG directory
+selects an independent identity; stop an old daemon before switching directories.
+Run `bitchat doctor` to inspect the selected paths.
+
+See the [CLI reference](docs/cli-reference.md) for complete command syntax and
+[CLI design notes](docs/cli-design.md) for the applicable guidelines and checks.
+
 ## Common workflows
 Start the background listener once, then use the short-lived commands below:
 
@@ -301,3 +348,9 @@ This client follows the public protocol behavior of the official projects:
 The implementation is intentionally narrow and aims to make its limits visible:
 read the source and run `doctor`, `selftest`, and the relevant `--help` output
 before relying on a feature.
+
+## Installed end-to-end validation
+
+See [docs/e2e-validation.md](docs/e2e-validation.md) for actual installed-command,
+daemon/socket and persisted-data checks with isolated identities and controlled
+local transports. These tests do not send public radio or relay messages.

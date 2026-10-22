@@ -7,14 +7,16 @@ from .state import RuntimePaths
 
 
 class DaemonClient:
-    def __init__(self, runtime: RuntimePaths) -> None:
+    def __init__(self, runtime: RuntimePaths, *, timeout_seconds: float = 30.0) -> None:
         self.runtime = runtime
+        self.timeout_seconds = timeout_seconds
 
     def send_command(self, payload: dict[str, object]) -> dict[str, object]:
         if not self.runtime.daemon_socket_path.exists():
             raise RuntimeError("daemon socket not found; start `bitchat daemon start` first")
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
+            client.settimeout(self.timeout_seconds)
             client.connect(str(self.runtime.daemon_socket_path))
             client.sendall((json.dumps(payload) + "\n").encode("utf-8"))
             response = b""
@@ -23,16 +25,31 @@ class DaemonClient:
                 if not chunk:
                     break
                 response += chunk
+        except TimeoutError as exc:
+            raise RuntimeError("daemon request timed out; inspect `bitchat daemon status` before retrying (a send may already be queued)") from exc
         except OSError as exc:
             raise RuntimeError(f"failed to talk to daemon: {exc}") from exc
         finally:
             client.close()
         if not response:
             raise RuntimeError("daemon returned no response")
-        decoded = json.loads(response.decode("utf-8"))
-        if not decoded.get("ok", False):
+        if not response.endswith(b"\n"):
+            raise RuntimeError("incomplete response from daemon; inspect `bitchat daemon status`")
+        try:
+            decoded = json.loads(response.decode("utf-8"))
+        except (ValueError, UnicodeError) as exc:
+            raise RuntimeError("invalid response from daemon; inspect `bitchat daemon status`") from exc
+        if not isinstance(decoded, dict):
+            raise RuntimeError("invalid response from daemon; expected a JSON object")
+        if decoded.get("ok") is not True:
             raise RuntimeError(str(decoded.get("error") or "daemon command failed"))
         return decoded
+
+    def _send_with_identifier(self, key: str, payload: dict[str, object]) -> dict[str, object]:
+        response = self.send_command(payload)
+        if not isinstance(response.get(key), str) or not response[key]:
+            raise RuntimeError(f"invalid response from daemon: missing {key}; inspect `bitchat daemon status` before retrying (a send may already be queued)")
+        return response
 
     def runtime_status(self) -> dict[str, object]:
         response = self.send_command({"command": "runtime_status"})
@@ -40,7 +57,7 @@ class DaemonClient:
         return runtime_status if isinstance(runtime_status, dict) else {}
 
     def send_dm(self, *, peer_id: str, content: str) -> dict[str, object]:
-        return self.send_command(
+        return self._send_with_identifier("message_id",
             {
                 "command": "dm_send",
                 "peer_id": peer_id,
@@ -49,7 +66,7 @@ class DaemonClient:
         )
 
     def send_dm_file(self, *, peer_id: str, path: str) -> dict[str, object]:
-        return self.send_command(
+        return self._send_with_identifier("transfer_id",
             {
                 "command": "dm_send_file",
                 "peer_id": peer_id,
@@ -66,7 +83,7 @@ class DaemonClient:
         )
 
     def send_public_file(self, *, path: str) -> dict[str, object]:
-        return self.send_command(
+        return self._send_with_identifier("transfer_id",
             {
                 "command": "public_send_file",
                 "path": path,
@@ -92,7 +109,7 @@ class DaemonClient:
         )
 
     def send_geo_dm(self, *, geohash: str, peer_pubkey: str, content: str) -> dict[str, object]:
-        return self.send_command(
+        return self._send_with_identifier("message_id",
             {
                 "command": "geo_dm_send",
                 "geohash": geohash,

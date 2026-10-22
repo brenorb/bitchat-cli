@@ -1132,6 +1132,7 @@ def test_run_daemon_start_uses_repo_src_in_pythonpath(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
     monkeypatch.setattr(app.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(app, "_wait_for_daemon_ready", lambda *_: True)
 
     exit_code = app.run_daemon_start(argparse.Namespace(nickname="clanker", scan_interval=5.0))
 
@@ -1355,3 +1356,16 @@ def test_run_dm_history_emits_read_receipts_for_unread_inbound_messages(tmp_path
             "message_ids": ["dm-1"],
         }
     ]
+
+
+def test_topic_list_json_does_not_expose_password(tmp_path, monkeypatch, capsys):
+    import json
+    runtime = RuntimePaths(tmp_path)
+    store = app.StateStore(runtime.state_path)
+    state = store.load()
+    state.topic_channels = {'#friends': {'password': 'do-not-print', 'password_set': True}}
+    store.save(state)
+    monkeypatch.setattr(app, 'StateStore', lambda: store)
+    assert app.run_topic_list(argparse.Namespace(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == [{'channel': '#friends', 'password_set': True}]

@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
+import os
+import sys
+from importlib.metadata import version
 
 from .app import (
     run_chat,
@@ -61,9 +65,49 @@ from .app import (
 )
 
 
+class CommandParser(argparse.ArgumentParser):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
+
+
+def positive_int(value: str) -> int:
+    number = int(value)
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
+
+
+def nonnegative_int(value: str) -> int:
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return number
+
+
+def positive_seconds(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise argparse.ArgumentTypeError("must be a positive, finite number of seconds")
+    return number
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="bitchat", description="BitChat public BLE chat CLI")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser = CommandParser(
+        prog="bitchat", description="BitChat public BLE chat CLI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  bitchat doctor
+  bitchat daemon start
+  bitchat mesh send 'hello mesh'
+  bitchat inbox --json
+
+Use bitchat help COMMAND for command help.
+Documentation: https://github.com/brenorb/bitchat-cli/blob/main/docs/cli-reference.md
+Support: https://github.com/brenorb/bitchat-cli/issues""",
+    )
+    parser.add_argument("--version", action="version", version=f"bitchat {version('bitchat4agents')}")
+    subparsers = parser.add_subparsers(dest="command", required=False)
 
     doctor = subparsers.add_parser("doctor", help="Show local configuration and current scope")
     doctor.add_argument("--json", action="store_true", help="Output machine-readable JSON")
@@ -71,15 +115,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     chat = subparsers.add_parser("chat", help="Run the interactive public chat client")
     chat.add_argument("--nickname", help="Override the persisted nickname for this session")
-    chat.add_argument("--scan-interval", type=float, default=5.0, help="BLE scan interval in seconds")
+    chat.add_argument("--scan-interval", type=positive_seconds, default=5.0, help="BLE scan interval in seconds")
     chat.set_defaults(async_handler=run_chat)
 
     daemon = subparsers.add_parser("daemon", help="Manage the background listener")
-    daemon_subparsers = daemon.add_subparsers(dest="daemon_command", required=True)
+    daemon_subparsers = daemon.add_subparsers(dest="daemon_command", required=False)
 
     daemon_start = daemon_subparsers.add_parser("start", help="Start the background listener")
     daemon_start.add_argument("--nickname", help="Override the persisted nickname for the daemon")
-    daemon_start.add_argument("--scan-interval", type=float, default=5.0, help="BLE scan interval in seconds")
+    daemon_start.add_argument("--scan-interval", type=positive_seconds, default=5.0, help="BLE scan interval in seconds")
     daemon_start.set_defaults(handler=run_daemon_start)
 
     daemon_stop = daemon_subparsers.add_parser("stop", help="Stop the background listener")
@@ -90,24 +134,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     daemon_run = subparsers.add_parser("daemon-run", help=argparse.SUPPRESS)
     daemon_run.add_argument("--nickname")
-    daemon_run.add_argument("--scan-interval", type=float, default=5.0)
+    daemon_run.add_argument("--scan-interval", type=positive_seconds, default=5.0)
     daemon_run.set_defaults(async_handler=run_daemon_foreground)
 
     inbox = subparsers.add_parser("inbox", help="Show recorded inbound messages")
     inbox.add_argument("--json", action="store_true", help="Output JSON")
-    inbox.add_argument("--tail", type=int, help="Show only the last N inbound messages")
+    inbox.add_argument("--tail", type=positive_int, help="Show only the last N inbound messages")
     inbox.set_defaults(handler=run_inbox)
 
     mesh = subparsers.add_parser("mesh", help="Work with the public #mesh conversation")
-    mesh_subparsers = mesh.add_subparsers(dest="mesh_command", required=True)
+    mesh_subparsers = mesh.add_subparsers(dest="mesh_command", required=False)
 
     mesh_inbox = mesh_subparsers.add_parser("inbox", help="Show recorded #mesh messages")
     mesh_inbox.add_argument("--json", action="store_true", help="Output JSON")
-    mesh_inbox.add_argument("--tail", type=int, help="Show only the last N inbound messages")
+    mesh_inbox.add_argument("--tail", type=positive_int, help="Show only the last N inbound messages")
     mesh_inbox.set_defaults(handler=run_inbox)
 
     mesh_send = mesh_subparsers.add_parser("send", help="Send one public message to #mesh through the background daemon")
-    mesh_send.add_argument("message", help="Message body")
+    mesh_send.add_argument("message", help="Message body; use - to read piped standard input")
     mesh_send.set_defaults(handler=run_send)
 
     mesh_send_file = mesh_subparsers.add_parser("send-file", help="Send one public file to #mesh through the background daemon")
@@ -115,7 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
     mesh_send_file.set_defaults(handler=run_send_file)
 
     send = subparsers.add_parser("send", help="Send one public message through the background daemon")
-    send.add_argument("message", help="Message body")
+    send.add_argument("message", help="Message body; use - to read piped standard input")
     send.set_defaults(handler=run_send)
 
     send_file = subparsers.add_parser("send-file", help="Send one public file through the background daemon")
@@ -123,13 +167,13 @@ def build_parser() -> argparse.ArgumentParser:
     send_file.set_defaults(handler=run_send_file)
 
     geo = subparsers.add_parser("geo", help="Work with location geohash channels over Nostr")
-    geo_subparsers = geo.add_subparsers(dest="geo_command", required=True)
+    geo_subparsers = geo.add_subparsers(dest="geo_command", required=False)
 
     geo_send = geo_subparsers.add_parser("send", help="Send one public message to a geohash channel")
     geo_send.add_argument("geohash", help="Target geohash, with or without leading #")
     geo_send.add_argument(
         "--pow",
-        type=int,
+        type=nonnegative_int,
         default=0,
         help="Optional NIP-13 proof-of-work difficulty in leading zero bits",
     )
@@ -139,13 +183,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Mark the geohash message as teleported, matching the official app tag",
     )
     geo_send.add_argument("--force", action="store_true", help="Acknowledge high-precision geohash disclosure risk")
-    geo_send.add_argument("message", help="Message body")
+    geo_send.add_argument("message", help="Message body; use - to read piped standard input")
     geo_send.set_defaults(handler=run_geo_send)
 
     geo_inbox = geo_subparsers.add_parser("inbox", help="Show recorded inbound messages for one geohash channel")
     geo_inbox.add_argument("geohash", help="Target geohash, with or without leading #")
     geo_inbox.add_argument("--json", action="store_true", help="Output JSON")
-    geo_inbox.add_argument("--tail", type=int, help="Show only the last N inbound messages")
+    geo_inbox.add_argument("--tail", type=positive_int, help="Show only the last N inbound messages")
     geo_inbox.set_defaults(handler=run_geo_inbox)
 
     geo_who = geo_subparsers.add_parser("who", help="Show recently seen participants for one geohash channel")
@@ -161,8 +205,9 @@ def build_parser() -> argparse.ArgumentParser:
     geo_encode = geo_subparsers.add_parser("encode", help="Derive one or all geohashes from coordinates")
     geo_encode.add_argument("--lat", type=float, required=True, help="Latitude in decimal degrees")
     geo_encode.add_argument("--lon", type=float, required=True, help="Longitude in decimal degrees")
-    geo_encode.add_argument("--level", choices=["region", "province", "city", "neighborhood", "block", "building"])
-    geo_encode.add_argument("--all-levels", action="store_true", help="Print the full upstream-compatible level set")
+    geo_encode_mode = geo_encode.add_mutually_exclusive_group()
+    geo_encode_mode.add_argument("--level", choices=["region", "province", "city", "neighborhood", "block", "building"])
+    geo_encode_mode.add_argument("--all-levels", action="store_true", help="Print the full upstream-compatible level set")
     geo_encode.add_argument("--json", action="store_true", help="Output JSON")
     geo_encode.set_defaults(handler=run_geo_encode)
 
@@ -173,23 +218,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     geo_lookup = geo_subparsers.add_parser("lookup", help="Resolve a place name to coordinates and geohashes")
     geo_lookup.add_argument("query", help="Free-form place query")
-    geo_lookup.add_argument("--limit", type=int, default=5, help="Maximum number of matches to return")
+    geo_lookup.add_argument("--limit", type=positive_int, default=5, help="Maximum number of matches to return")
     geo_lookup.add_argument("--json", action="store_true", help="Output JSON")
     geo_lookup.set_defaults(handler=run_geo_lookup)
 
     geo_channel = geo_subparsers.add_parser("channel", help="Manage saved geohash channel metadata")
-    geo_channel_subparsers = geo_channel.add_subparsers(dest="geo_channel_command", required=True)
+    geo_channel_subparsers = geo_channel.add_subparsers(dest="geo_channel_command", required=False)
 
     geo_channel_set = geo_channel_subparsers.add_parser("set", help="Save local metadata for a geohash")
     geo_channel_set.add_argument("geohash", help="Target geohash, with or without leading #")
     geo_channel_set.add_argument("--name", help="Friendly display name")
     geo_channel_set.add_argument("--note", help="Private local note for this geohash")
-    geo_channel_set.add_argument("--bookmark", action="store_true", help="Bookmark the geohash")
-    geo_channel_set.add_argument("--unbookmark", action="store_true", help="Remove bookmark state")
-    geo_channel_set.add_argument("--select", action="store_true", help="Mark this as the selected geohash context")
-    geo_channel_set.add_argument("--unselect", action="store_true", help="Clear selected state")
-    geo_channel_set.add_argument("--teleport", action="store_true", help="Mark the saved context as teleported")
-    geo_channel_set.add_argument("--no-teleport", action="store_true", help="Clear saved teleport state")
+    bookmark_mode = geo_channel_set.add_mutually_exclusive_group()
+    bookmark_mode.add_argument("--bookmark", action="store_true", help="Bookmark the geohash")
+    bookmark_mode.add_argument("--unbookmark", action="store_true", help="Remove bookmark state")
+    select_mode = geo_channel_set.add_mutually_exclusive_group()
+    select_mode.add_argument("--select", action="store_true", help="Mark this as the selected geohash context")
+    select_mode.add_argument("--unselect", action="store_true", help="Clear selected state")
+    teleport_mode = geo_channel_set.add_mutually_exclusive_group()
+    teleport_mode.add_argument("--teleport", action="store_true", help="Mark the saved context as teleported")
+    teleport_mode.add_argument("--no-teleport", action="store_true", help="Clear saved teleport state")
     geo_channel_set.set_defaults(handler=run_geo_channel_set)
 
     geo_channel_show = geo_channel_subparsers.add_parser("show", help="Show saved metadata and recent activity for one geohash")
@@ -203,37 +251,37 @@ def build_parser() -> argparse.ArgumentParser:
     geo_channel_list.set_defaults(handler=run_geo_channel_list)
 
     geo_notes = geo_subparsers.add_parser("notes", help="Publish and inspect persistent location notes")
-    geo_notes_subparsers = geo_notes.add_subparsers(dest="geo_notes_command", required=True)
+    geo_notes_subparsers = geo_notes.add_subparsers(dest="geo_notes_command", required=False)
 
     geo_notes_add = geo_notes_subparsers.add_parser("add", help="Publish a location note for one building geohash")
     geo_notes_add.add_argument("geohash", help="Building-level geohash, with or without leading #")
-    geo_notes_add.add_argument("message", help="Note body")
+    geo_notes_add.add_argument("message", help="Note body; use - to read piped standard input")
     geo_notes_add.set_defaults(handler=run_geo_notes_add)
 
     geo_notes_list = geo_notes_subparsers.add_parser("list", help="Fetch persistent location notes for one building geohash")
     geo_notes_list.add_argument("geohash", help="Building-level geohash, with or without leading #")
     geo_notes_list.add_argument("--json", action="store_true", help="Output JSON")
-    geo_notes_list.add_argument("--limit", type=int, default=50, help="Maximum notes to return")
+    geo_notes_list.add_argument("--limit", type=positive_int, default=50, help="Maximum notes to return")
     geo_notes_list.set_defaults(handler=run_geo_notes_list)
 
     geo_dm = geo_subparsers.add_parser("dm", help="Send and inspect geohash-scoped Nostr DMs")
-    geo_dm_subparsers = geo_dm.add_subparsers(dest="geo_dm_command", required=True)
+    geo_dm_subparsers = geo_dm.add_subparsers(dest="geo_dm_command", required=False)
 
     geo_dm_send = geo_dm_subparsers.add_parser("send", help="Send a geohash-scoped Nostr DM")
     geo_dm_send.add_argument("geohash", help="Source geohash, with or without leading #")
     geo_dm_send.add_argument("target", help="Participant pubkey, npub, or @nickname")
-    geo_dm_send.add_argument("message", help="Message body")
+    geo_dm_send.add_argument("message", help="Message body; use - to read piped standard input")
     geo_dm_send.set_defaults(handler=run_geo_dm_send)
 
     geo_dm_history = geo_dm_subparsers.add_parser("history", help="Show geohash-scoped DM history for one participant")
     geo_dm_history.add_argument("geohash", help="Source geohash, with or without leading #")
     geo_dm_history.add_argument("target", help="Participant pubkey, npub, or @nickname")
     geo_dm_history.add_argument("--json", action="store_true", help="Output JSON")
-    geo_dm_history.add_argument("--tail", type=int, help="Show only the last N rows")
+    geo_dm_history.add_argument("--tail", type=positive_int, help="Show only the last N rows")
     geo_dm_history.set_defaults(handler=run_geo_dm_history)
 
     geo_participant = geo_subparsers.add_parser("participant", help="Inspect and moderate geohash participants")
-    geo_participant_subparsers = geo_participant.add_subparsers(dest="geo_participant_command", required=True)
+    geo_participant_subparsers = geo_participant.add_subparsers(dest="geo_participant_command", required=False)
 
     geo_participant_show = geo_participant_subparsers.add_parser("show", help="Show saved trust state for one participant")
     geo_participant_show.add_argument("geohash", help="Observed geohash, with or without leading #")
@@ -251,7 +299,7 @@ def build_parser() -> argparse.ArgumentParser:
     geo_participant_unblock.set_defaults(handler=run_geo_participant_unblock)
 
     geo_watch = geo_subparsers.add_parser("watch", help="Manage background geohash subscriptions")
-    geo_watch_subparsers = geo_watch.add_subparsers(dest="geo_watch_command", required=True)
+    geo_watch_subparsers = geo_watch.add_subparsers(dest="geo_watch_command", required=False)
 
     geo_watch_add = geo_watch_subparsers.add_parser("add", help="Subscribe the daemon to a geohash channel")
     geo_watch_add.add_argument("geohash", help="Target geohash, with or without leading #")
@@ -271,7 +319,7 @@ def build_parser() -> argparse.ArgumentParser:
     peers.set_defaults(handler=run_peers)
 
     social = subparsers.add_parser("social", help="Manage social trust and Nostr fallback mappings")
-    social_subparsers = social.add_subparsers(dest="social_command", required=True)
+    social_subparsers = social.add_subparsers(dest="social_command", required=False)
 
     social_list = social_subparsers.add_parser("list", help="Show linked social records")
     social_list.add_argument("--json", action="store_true", help="Output JSON")
@@ -316,10 +364,10 @@ def build_parser() -> argparse.ArgumentParser:
     social_unverify.set_defaults(handler=run_social_unverify)
 
     network = subparsers.add_parser("network", help="Manage privacy policy and network proxy behavior")
-    network_subparsers = network.add_subparsers(dest="network_command", required=True)
+    network_subparsers = network.add_subparsers(dest="network_command", required=False)
 
     network_proxy = network_subparsers.add_parser("proxy", help="Manage outbound network proxy settings")
-    network_proxy_subparsers = network_proxy.add_subparsers(dest="network_proxy_command", required=True)
+    network_proxy_subparsers = network_proxy.add_subparsers(dest="network_proxy_command", required=False)
 
     network_proxy_status = network_proxy_subparsers.add_parser("status", help="Show the current proxy policy")
     network_proxy_status.add_argument("--json", action="store_true", help="Output JSON")
@@ -338,22 +386,22 @@ def build_parser() -> argparse.ArgumentParser:
     network_proxy_test.set_defaults(handler=run_network_proxy_test)
 
     dm = subparsers.add_parser("dm", help="Inspect direct-message history recorded by the CLI")
-    dm_subparsers = dm.add_subparsers(dest="dm_command", required=True)
+    dm_subparsers = dm.add_subparsers(dest="dm_command", required=False)
 
     dm_inbox = dm_subparsers.add_parser("inbox", help="List recorded DM conversations")
     dm_inbox.add_argument("--json", action="store_true", help="Output JSON")
-    dm_inbox.add_argument("--tail", type=int, help="Show only the last N conversations")
+    dm_inbox.add_argument("--tail", type=positive_int, help="Show only the last N conversations")
     dm_inbox.set_defaults(handler=run_dm_inbox)
 
     dm_history = dm_subparsers.add_parser("history", help="Show DM history for one peer")
     dm_history.add_argument("target", help="Peer ID or @nickname")
     dm_history.add_argument("--json", action="store_true", help="Output JSON")
-    dm_history.add_argument("--tail", type=int, help="Show only the last N rows")
+    dm_history.add_argument("--tail", type=positive_int, help="Show only the last N rows")
     dm_history.set_defaults(handler=run_dm_history)
 
     dm_send = dm_subparsers.add_parser("send", help="Send one DM through the background daemon")
     dm_send.add_argument("target", help="Peer ID or @nickname")
-    dm_send.add_argument("message", help="Message body")
+    dm_send.add_argument("message", help="Message body; use - to read piped standard input")
     dm_send.set_defaults(handler=run_dm_send)
 
     dm_send_file = dm_subparsers.add_parser("send-file", help="Send one file over DM through the background daemon")
@@ -362,11 +410,13 @@ def build_parser() -> argparse.ArgumentParser:
     dm_send_file.set_defaults(handler=run_dm_send_file)
 
     topic = subparsers.add_parser("topic", help="Manage Android-style named topic channels locally")
-    topic_subparsers = topic.add_subparsers(dest="topic_command", required=True)
+    topic_subparsers = topic.add_subparsers(dest="topic_command", required=False)
 
     topic_join = topic_subparsers.add_parser("join", help="Join or create a local named topic channel")
     topic_join.add_argument("channel", help="Channel name, with or without leading #")
-    topic_join.add_argument("--password", help="Optional password marker for the topic")
+    topic_join_password = topic_join.add_mutually_exclusive_group()
+    topic_join_password.add_argument("--password", help="Password marker (prefer --password-stdin to avoid shell history)")
+    topic_join_password.add_argument("--password-stdin", action="store_true", help="Read one password line from piped standard input")
     topic_join.add_argument("--retain", action="store_true", help="Enable local retention for the topic")
     topic_join.set_defaults(handler=run_topic_join)
 
@@ -380,7 +430,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     topic_password = topic_subparsers.add_parser("password", help="Set or clear a stored topic password")
     topic_password.add_argument("channel", help="Channel name, with or without leading #")
-    topic_password.add_argument("password", nargs="?", help="Password to store; omit to clear")
+    topic_password.add_argument("password", nargs="?", help="Password to store; omit to clear (prefer --password-stdin)")
+    topic_password.add_argument("--password-stdin", action="store_true", help="Read one password line from piped standard input")
     topic_password.set_defaults(handler=run_topic_password_set)
 
     topic_retain = topic_subparsers.add_parser("retain", help="Enable or disable local retention for a topic")
@@ -390,15 +441,89 @@ def build_parser() -> argparse.ArgumentParser:
 
     selftest = subparsers.add_parser("selftest", help="Run offline protocol checks")
     selftest.set_defaults(handler=run_selftest)
+    subparsers._choices_actions = [action for action in subparsers._choices_actions if action.dest != "daemon-run"]
+    subparsers.metavar = "{" + ",".join(name for name in subparsers.choices if name != "daemon-run") + "}"
     return parser
 
 
-def main() -> int:
+def _help_parser(parser: argparse.ArgumentParser, argv: list[str]) -> argparse.ArgumentParser:
+    """Resolve command tokens without validating unrelated help arguments."""
+    current = parser
+    for token in argv:
+        actions = [a for a in current._actions if isinstance(a, argparse._SubParsersAction)]
+        if not actions or token not in actions[0].choices:
+            break
+        current = actions[0].choices[token]
+    return current
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args()
-    if hasattr(args, "async_handler"):
-        return asyncio.run(args.async_handler(args))
-    return args.handler(args)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "help":
+        target = parser
+        for token in argv[1:]:
+            child = _help_parser(target, [token])
+            if child is target:
+                parser.error(f"unknown help command: {token}")
+            target = child
+        target.print_help()
+        return 0
+    if any(flag in argv[:argv.index("--") if "--" in argv else len(argv)] for flag in ("-h", "--help")):
+        _help_parser(parser, argv).print_help()
+        return 0
+    if argv == ["--version"]:
+        print(f"bitchat {version('bitchat4agents')}")
+        return 0
+    args = parser.parse_args(argv)
+    if not hasattr(args, "handler") and not hasattr(args, "async_handler"):
+        _help_parser(parser, argv).print_help()
+        return 0
+    if getattr(args, "password_stdin", False) and getattr(args, "password", None) is not None:
+        parser.error("password and --password-stdin cannot be combined")
+    try:
+        if getattr(args, "password_stdin", False):
+            if sys.stdin.isatty():
+                raise RuntimeError("--password-stdin requires a pipe or file redirect")
+            password = sys.stdin.read().removesuffix("\n").removesuffix("\r")
+            if not password or "\n" in password or "\r" in password:
+                raise ValueError("--password-stdin requires one nonempty password line")
+            args.password = password
+        if getattr(args, "message", None) == "-":
+            if sys.stdin.isatty():
+                raise RuntimeError("message - requires a pipe or file redirect")
+            args.message = sys.stdin.read().removesuffix("\n").removesuffix("\r")
+            if not args.message.strip():
+                raise ValueError("message from stdin must not be empty")
+        if args.command == "chat" and not (sys.stdin.isatty() and sys.stdout.isatty()):
+            raise RuntimeError("chat requires an interactive terminal; use `bitchat daemon start`, `bitchat send`, and `bitchat inbox` in scripts")
+        if hasattr(args, "async_handler"):
+            result = asyncio.run(args.async_handler(args))
+        else:
+            result = args.handler(args)
+        sys.stdout.flush()
+        return result
+    except BrokenPipeError:
+        raise
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"bitchat: {exc}", file=sys.stderr)
+        return 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        result = _main(argv)
+        sys.stdout.flush()
+        return result
+    except BrokenPipeError:
+        # Avoid another failure during Python's final flush of a closed pipe.
+        if sys.stdout is sys.__stdout__:
+            with open(os.devnull, "w") as null:
+                os.dup2(null.fileno(), sys.stdout.fileno())
+        return 0
+    except KeyboardInterrupt:
+        print("bitchat: interrupted", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

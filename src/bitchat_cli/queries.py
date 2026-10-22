@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -208,7 +209,7 @@ def run_geo_inbox(
     try:
         geohash = normalize_geo_target(args.geohash)
     except RuntimeError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     records = [
         row
@@ -239,7 +240,7 @@ def run_geo_levels(args: argparse.Namespace) -> int:
     try:
         levels = geohash_levels(args.geohash)
     except ValueError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     if args.json:
         print(json.dumps(levels, indent=2))
@@ -257,7 +258,7 @@ def run_geo_encode(args: argparse.Namespace) -> int:
             level = args.level or "city"
             payload = {level: encode_geohash(float(args.lat), float(args.lon), precision=geohash_precision_for_level(level))}
     except ValueError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     if args.json:
         print(json.dumps(payload, indent=2))
@@ -278,7 +279,7 @@ def run_geo_decode(
         center_lat = (lat_bounds[0] + lat_bounds[1]) / 2
         center_lon = (lon_bounds[0] + lon_bounds[1]) / 2
     except (RuntimeError, ValueError) as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     payload = {
         "geohash": geohash,
@@ -313,7 +314,7 @@ def run_geo_lookup(
             limit=int(args.limit),
         )
     except Exception as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     if args.json:
         print(json.dumps(results, indent=2))
@@ -321,7 +322,7 @@ def run_geo_lookup(
     if not results:
         print("no place matches found")
         return 0
-    print("network lookup; no query or coordinates were persisted")
+    print("network lookup; no query or coordinates were persisted", file=sys.stderr)
     for index, row in enumerate(results, start=1):
         print(f"[{index}] {row['label']}")
         print(f"    {row['lat']:.6f}, {row['lon']:.6f}")
@@ -344,7 +345,7 @@ def run_geo_who(
     try:
         geohash = normalize_geo_target(args.geohash)
     except RuntimeError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     state = state_store_factory(runtime.state_path).load()
     participants = geohash_participants(
