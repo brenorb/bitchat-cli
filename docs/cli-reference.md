@@ -153,10 +153,10 @@ fallback for text and receipts. Files use BLE only.
 ## Local topic metadata
 
 ```text
-bitchat topic join CHANNEL [--password PASSWORD | --password-stdin] [--retain]
+bitchat topic join CHANNEL [--password PASSWORD | --password-stdin | --password-file PATH] [--retain]
 bitchat topic leave CHANNEL
 bitchat topic list [--json]
-bitchat topic password CHANNEL [PASSWORD | --password-stdin]
+bitchat topic password CHANNEL [PASSWORD | --password-stdin | --password-file PATH]
 bitchat topic retain CHANNEL on|off
 ```
 
@@ -190,7 +190,11 @@ One final newline is removed, embedded newlines are retained, and an empty
 message is rejected. Literal `-` is reserved for stdin. File transfers require
 a local file path. `--password-stdin` reads a single nonempty password line
 from a pipe or redirect; combine it with neither `--password` nor a positional
-password. Omitting the password from `topic password CHANNEL` still clears it.
+password or `--password-file`. `--password-file PATH` reads the same one-line
+UTF-8 format from a private file and preserves stdin for the agent. File and
+argument sources are mutually exclusive and never prompt; errors use stderr
+and exit 1 (conflicting sources exit 2) before modifying topic state.
+Omitting every password source from `topic password CHANNEL` still clears it.
 Legacy password arguments can be exposed through shell history/process listings.
 
 `chat` requires terminal stdin and stdout and supports `/quit` and Ctrl-C.

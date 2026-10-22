@@ -820,6 +820,20 @@ def test_run_geo_dm_history_uses_nostr_identity_for_social_nickname(tmp_path: Pa
     assert "geo dm sent by nickname" in captured.out
 
 
+def test_geo_notes_query_failure_keeps_json_stdout_clean(tmp_path, monkeypatch, capsys) -> None:
+    runtime = RuntimePaths(tmp_path)
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+
+    async def fail(**_kwargs):
+        raise RuntimeError("relay unavailable")
+
+    monkeypatch.setattr(app, "fetch_location_notes", fail)
+    assert app.run_geo_notes_list(argparse.Namespace(geohash="u4pru", json=True, limit=5)) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "relay unavailable" in output.err
+
+
 def test_run_geo_notes_list_renders_fetched_notes(tmp_path: Path, monkeypatch, capsys) -> None:
     runtime = RuntimePaths(tmp_path)
     state = app.StateStore(runtime.state_path).load()

@@ -102,15 +102,21 @@ commands with 130. Success and a consumer closing an output pipe return 0.
 short-lived `send`/`inbox` commands instead.
 
 Pipe a message by passing `-` as its body, or keep a topic password out of the
-shell history and process arguments with `--password-stdin`:
+shell history and process arguments with `--password-file` or `--password-stdin`:
 
 ```bash
 printf 'hello from a pipeline\n' | bitchat mesh send -
 bitchat inbox --json | jq '.[].content'
 bitchat topic join friends --password-stdin < /path/to/password-file
+bitchat topic join friends --password-file /path/to/password-file
+bitchat topic password friends --password-file /path/to/password-file
 ```
 
-`--password-stdin` accepts one nonempty line and never prompts on a terminal.
+Both sources accept one nonempty UTF-8 line and never prompt. `--password-file`
+leaves stdin available to the calling agent. Protect the source file with
+owner-only permissions (mode `0600`). Password sources cannot be combined;
+invalid/unreadable files fail without changing the saved topic password.
+`--password-stdin` refuses terminal input.
 Existing password arguments remain available, but can appear in shell history
 and process listings. `topic list --json` reports `password_set` without
 printing the password. Passwords and private identity keys remain local in
