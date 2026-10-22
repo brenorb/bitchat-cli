@@ -131,3 +131,17 @@ def test_explicit_message_stdin_is_composable(monkeypatch):
     monkeypatch.setattr(cli, 'run_send', lambda args: seen.update(message=args.message) or 0)
     assert cli.main(['mesh', 'send', '-']) == 0
     assert seen['message'] == 'hello from pipeline'
+
+
+def test_help_also_handles_closed_stdout(monkeypatch):
+    def closed(_parser):
+        raise BrokenPipeError
+    monkeypatch.setattr(cli.CommandParser, 'print_help', closed)
+    assert cli.main(['--help']) == 0
+
+
+def test_help_rejects_unknown_nested_command(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(['help', 'geo', 'typo'])
+    assert exc.value.code == 2
+    assert 'typo' in capsys.readouterr().err

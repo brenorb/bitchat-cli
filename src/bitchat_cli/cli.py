@@ -457,13 +457,16 @@ def _help_parser(parser: argparse.ArgumentParser, argv: list[str]) -> argparse.A
     return current
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "help":
-        target = _help_parser(parser, argv[1:])
-        if argv[1:] and target is parser:
-            parser.error(f"unknown help command: {argv[1]}")
+        target = parser
+        for token in argv[1:]:
+            child = _help_parser(target, [token])
+            if child is target:
+                parser.error(f"unknown help command: {token}")
+            target = child
         target.print_help()
         return 0
     if any(flag in argv[:argv.index("--") if "--" in argv else len(argv)] for flag in ("-h", "--help")):
@@ -501,6 +504,18 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.flush()
         return result
     except BrokenPipeError:
+        raise
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"bitchat: {exc}", file=sys.stderr)
+        return 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        result = _main(argv)
+        sys.stdout.flush()
+        return result
+    except BrokenPipeError:
         # Avoid another failure during Python's final flush of a closed pipe.
         if sys.stdout is sys.__stdout__:
             with open(os.devnull, "w") as null:
@@ -509,9 +524,6 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("bitchat: interrupted", file=sys.stderr)
         return 130
-    except (OSError, ValueError, RuntimeError) as exc:
-        print(f"bitchat: {exc}", file=sys.stderr)
-        return 1
 
 
 if __name__ == "__main__":
