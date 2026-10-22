@@ -328,3 +328,36 @@ def test_state_store_backfills_nostr_seed_and_geo_watches_for_legacy_state(tmp_p
     assert loaded.watched_geohashes == []
     assert reloaded.nostr_device_seed_hex == loaded.nostr_device_seed_hex
     assert reloaded.nostr_private_key_hex == loaded.nostr_private_key_hex
+
+
+def test_default_app_dir_honors_absolute_xdg_config_home(tmp_path, monkeypatch):
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'custom'))
+    assert state_module.default_app_dir() == tmp_path / 'custom' / 'bitchat'
+
+
+def test_relative_xdg_config_home_uses_home_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(state_module.Path, 'home', lambda: tmp_path)
+    monkeypatch.setenv('XDG_CONFIG_HOME', 'relative-config')
+    assert state_module.default_app_dir() == tmp_path / '.config' / 'bitchat'
+
+
+def test_state_save_is_private(tmp_path):
+    store = StateStore(tmp_path / 'private' / 'state.json')
+    store.load()
+    assert store.path.stat().st_mode & 0o777 == 0o600
+    assert store.path.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_failed_atomic_state_save_preserves_previous_file(tmp_path, monkeypatch):
+    import pytest
+    store = StateStore(tmp_path / 'state.json')
+    state = store.load()
+    original = store.path.read_bytes()
+    state.nickname = 'changed'
+    def fail_replace(source, target):
+        raise OSError('disk unavailable')
+    monkeypatch.setattr(state_module.os, 'replace', fail_replace)
+    with pytest.raises(OSError, match='disk unavailable'):
+        store.save(state)
+    assert store.path.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [store.path]

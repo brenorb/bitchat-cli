@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +56,9 @@ def _normalize_nested_channel_map(
 
 
 def default_app_dir() -> Path:
+    config_home = os.environ.get("XDG_CONFIG_HOME", "")
+    if config_home and Path(config_home).is_absolute():
+        return Path(config_home) / "bitchat"
     preferred = Path.home() / ".config" / "bitchat"
     legacy = Path.home() / ".config" / "bitchat-cli"
     if _has_app_artifacts(legacy) and not _has_app_artifacts(preferred):
@@ -174,8 +178,19 @@ class StateStore:
         return state
 
     def save(self, state: AppState) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(state.to_json(), indent=2) + "\n")
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        temporary_path = None
+        try:
+            # Write next to the target so replace stays atomic on one filesystem.
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.path.parent, delete=False) as handle:
+                temporary_path = Path(handle.name)
+                handle.write(json.dumps(state.to_json(), indent=2) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, self.path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
 
 class RuntimePaths:
@@ -227,7 +242,7 @@ class RuntimePaths:
         return self.root / "radio.pid"
 
     def ensure(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
 
 
 def pid_is_running(pid: int) -> bool:
