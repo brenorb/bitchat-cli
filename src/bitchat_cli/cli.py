@@ -6,6 +6,7 @@ import math
 import os
 import sys
 from importlib.metadata import version
+from pathlib import Path
 
 from .app import (
     run_chat,
@@ -415,8 +416,9 @@ Support: https://github.com/brenorb/bitchat-cli/issues""",
     topic_join = topic_subparsers.add_parser("join", help="Join or create a local named topic channel")
     topic_join.add_argument("channel", help="Channel name, with or without leading #")
     topic_join_password = topic_join.add_mutually_exclusive_group()
-    topic_join_password.add_argument("--password", help="Password marker (prefer --password-stdin to avoid shell history)")
+    topic_join_password.add_argument("--password", help="Password marker (prefer --password-file or --password-stdin to avoid shell history)")
     topic_join_password.add_argument("--password-stdin", action="store_true", help="Read one password line from piped standard input")
+    topic_join_password.add_argument("--password-file", type=Path, help="Read one password line from a private UTF-8 file without consuming stdin")
     topic_join.add_argument("--retain", action="store_true", help="Enable local retention for the topic")
     topic_join.set_defaults(handler=run_topic_join)
 
@@ -430,8 +432,9 @@ Support: https://github.com/brenorb/bitchat-cli/issues""",
 
     topic_password = topic_subparsers.add_parser("password", help="Set or clear a stored topic password")
     topic_password.add_argument("channel", help="Channel name, with or without leading #")
-    topic_password.add_argument("password", nargs="?", help="Password to store; omit to clear (prefer --password-stdin)")
+    topic_password.add_argument("password", nargs="?", help="Password to store; omit to clear (prefer --password-file or --password-stdin)")
     topic_password.add_argument("--password-stdin", action="store_true", help="Read one password line from piped standard input")
+    topic_password.add_argument("--password-file", type=Path, help="Read one password line from a private UTF-8 file without consuming stdin")
     topic_password.set_defaults(handler=run_topic_password_set)
 
     topic_retain = topic_subparsers.add_parser("retain", help="Enable or disable local retention for a topic")
@@ -479,15 +482,22 @@ def _main(argv: list[str] | None = None) -> int:
     if not hasattr(args, "handler") and not hasattr(args, "async_handler"):
         _help_parser(parser, argv).print_help()
         return 0
-    if getattr(args, "password_stdin", False) and getattr(args, "password", None) is not None:
-        parser.error("password and --password-stdin cannot be combined")
+    password_file = getattr(args, "password_file", None)
+    password_stdin = getattr(args, "password_stdin", False)
+    if sum([getattr(args, "password", None) is not None, password_stdin, password_file is not None]) > 1:
+        parser.error("password, --password-file and --password-stdin cannot be combined")
     try:
-        if getattr(args, "password_stdin", False):
-            if sys.stdin.isatty():
+        if password_stdin or password_file is not None:
+            source = "--password-stdin" if password_stdin else "--password-file"
+            if password_stdin and sys.stdin.isatty():
                 raise RuntimeError("--password-stdin requires a pipe or file redirect")
-            password = sys.stdin.read().removesuffix("\n").removesuffix("\r")
+            try:
+                contents = sys.stdin.read() if password_stdin else password_file.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                raise ValueError(f"Cannot read {source}. Check the path/input and UTF-8 encoding.") from None
+            password = contents.removesuffix("\n").removesuffix("\r")
             if not password or "\n" in password or "\r" in password:
-                raise ValueError("--password-stdin requires one nonempty password line")
+                raise ValueError(f"{source} requires one nonempty password line")
             args.password = password
         if getattr(args, "message", None) == "-":
             if sys.stdin.isatty():
