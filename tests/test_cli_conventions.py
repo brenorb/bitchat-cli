@@ -96,3 +96,38 @@ def test_broken_pipe_exits_without_traceback(monkeypatch):
         raise BrokenPipeError
     monkeypatch.setattr(cli, 'run_selftest', fail)
     assert cli.main(['selftest']) == 0
+
+
+def test_password_can_come_from_stdin(monkeypatch):
+    import io
+    seen = {}
+    monkeypatch.setattr(cli.sys, 'stdin', io.StringIO('secret password\n'))
+    monkeypatch.setattr(cli, 'run_topic_join', lambda args: seen.update(password=args.password) or 0)
+    assert cli.main(['topic', 'join', 'friends', '--password-stdin']) == 0
+    assert seen['password'] == 'secret password'
+
+
+@pytest.mark.parametrize('secret_input', ['', 'one\ntwo\n'])
+def test_password_stdin_refuses_empty_or_multiline_secrets(monkeypatch, capsys, secret_input):
+    import io
+    monkeypatch.setattr(cli.sys, 'stdin', io.StringIO(secret_input))
+    assert cli.main(['topic', 'password', 'friends', '--password-stdin']) == 1
+    assert capsys.readouterr().out == ''
+
+
+def test_password_stdin_does_not_prompt_a_terminal(monkeypatch, capsys):
+    import io
+    stream = io.StringIO('secret\n')
+    stream.isatty = lambda: True
+    monkeypatch.setattr(cli.sys, 'stdin', stream)
+    assert cli.main(['topic', 'join', 'friends', '--password-stdin']) == 1
+    assert 'pipe' in capsys.readouterr().err
+
+
+def test_explicit_message_stdin_is_composable(monkeypatch):
+    import io
+    seen = {}
+    monkeypatch.setattr(cli.sys, 'stdin', io.StringIO('hello from pipeline\n'))
+    monkeypatch.setattr(cli, 'run_send', lambda args: seen.update(message=args.message) or 0)
+    assert cli.main(['mesh', 'send', '-']) == 0
+    assert seen['message'] == 'hello from pipeline'

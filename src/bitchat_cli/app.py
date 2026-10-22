@@ -2482,7 +2482,7 @@ def run_topic_leave(args: argparse.Namespace) -> int:
 def run_topic_list(args: argparse.Namespace) -> int:
     state = StateStore().load()
     rows = [
-        {"channel": channel, **row}
+        {"channel": channel, **{key: value for key, value in row.items() if key != "password"}}
         for channel, row in sorted(state.topic_channels.items())
     ]
     if args.json:

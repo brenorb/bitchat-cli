@@ -151,7 +151,7 @@ Support: https://github.com/brenorb/bitchat-cli/issues""",
     mesh_inbox.set_defaults(handler=run_inbox)
 
     mesh_send = mesh_subparsers.add_parser("send", help="Send one public message to #mesh through the background daemon")
-    mesh_send.add_argument("message", help="Message body")
+    mesh_send.add_argument("message", help="Message body; use - to read piped standard input")
     mesh_send.set_defaults(handler=run_send)
 
     mesh_send_file = mesh_subparsers.add_parser("send-file", help="Send one public file to #mesh through the background daemon")
@@ -159,7 +159,7 @@ Support: https://github.com/brenorb/bitchat-cli/issues""",
     mesh_send_file.set_defaults(handler=run_send_file)
 
     send = subparsers.add_parser("send", help="Send one public message through the background daemon")
-    send.add_argument("message", help="Message body")
+    send.add_argument("message", help="Message body; use - to read piped standard input")
     send.set_defaults(handler=run_send)
 
     send_file = subparsers.add_parser("send-file", help="Send one public file through the background daemon")
@@ -183,7 +183,7 @@ Support: https://github.com/brenorb/bitchat-cli/issues""",
         help="Mark the geohash message as teleported, matching the official app tag",
     )
     geo_send.add_argument("--force", action="store_true", help="Acknowledge high-precision geohash disclosure risk")
-    geo_send.add_argument("message", help="Message body")
+    geo_send.add_argument("message", help="Message body; use - to read piped standard input")
     geo_send.set_defaults(handler=run_geo_send)
 
     geo_inbox = geo_subparsers.add_parser("inbox", help="Show recorded inbound messages for one geohash channel")
@@ -255,7 +255,7 @@ Support: https://github.com/brenorb/bitchat-cli/issues""",
 
     geo_notes_add = geo_notes_subparsers.add_parser("add", help="Publish a location note for one building geohash")
     geo_notes_add.add_argument("geohash", help="Building-level geohash, with or without leading #")
-    geo_notes_add.add_argument("message", help="Note body")
+    geo_notes_add.add_argument("message", help="Note body; use - to read piped standard input")
     geo_notes_add.set_defaults(handler=run_geo_notes_add)
 
     geo_notes_list = geo_notes_subparsers.add_parser("list", help="Fetch persistent location notes for one building geohash")
@@ -270,7 +270,7 @@ Support: https://github.com/brenorb/bitchat-cli/issues""",
     geo_dm_send = geo_dm_subparsers.add_parser("send", help="Send a geohash-scoped Nostr DM")
     geo_dm_send.add_argument("geohash", help="Source geohash, with or without leading #")
     geo_dm_send.add_argument("target", help="Participant pubkey, npub, or @nickname")
-    geo_dm_send.add_argument("message", help="Message body")
+    geo_dm_send.add_argument("message", help="Message body; use - to read piped standard input")
     geo_dm_send.set_defaults(handler=run_geo_dm_send)
 
     geo_dm_history = geo_dm_subparsers.add_parser("history", help="Show geohash-scoped DM history for one participant")
@@ -401,7 +401,7 @@ Support: https://github.com/brenorb/bitchat-cli/issues""",
 
     dm_send = dm_subparsers.add_parser("send", help="Send one DM through the background daemon")
     dm_send.add_argument("target", help="Peer ID or @nickname")
-    dm_send.add_argument("message", help="Message body")
+    dm_send.add_argument("message", help="Message body; use - to read piped standard input")
     dm_send.set_defaults(handler=run_dm_send)
 
     dm_send_file = dm_subparsers.add_parser("send-file", help="Send one file over DM through the background daemon")
@@ -414,7 +414,9 @@ Support: https://github.com/brenorb/bitchat-cli/issues""",
 
     topic_join = topic_subparsers.add_parser("join", help="Join or create a local named topic channel")
     topic_join.add_argument("channel", help="Channel name, with or without leading #")
-    topic_join.add_argument("--password", help="Optional password marker for the topic")
+    topic_join_password = topic_join.add_mutually_exclusive_group()
+    topic_join_password.add_argument("--password", help="Password marker (prefer --password-stdin to avoid shell history)")
+    topic_join_password.add_argument("--password-stdin", action="store_true", help="Read one password line from piped standard input")
     topic_join.add_argument("--retain", action="store_true", help="Enable local retention for the topic")
     topic_join.set_defaults(handler=run_topic_join)
 
@@ -428,7 +430,8 @@ Support: https://github.com/brenorb/bitchat-cli/issues""",
 
     topic_password = topic_subparsers.add_parser("password", help="Set or clear a stored topic password")
     topic_password.add_argument("channel", help="Channel name, with or without leading #")
-    topic_password.add_argument("password", nargs="?", help="Password to store; omit to clear")
+    topic_password.add_argument("password", nargs="?", help="Password to store; omit to clear (prefer --password-stdin)")
+    topic_password.add_argument("--password-stdin", action="store_true", help="Read one password line from piped standard input")
     topic_password.set_defaults(handler=run_topic_password_set)
 
     topic_retain = topic_subparsers.add_parser("retain", help="Enable or disable local retention for a topic")
@@ -473,7 +476,22 @@ def main(argv: list[str] | None = None) -> int:
     if not hasattr(args, "handler") and not hasattr(args, "async_handler"):
         _help_parser(parser, argv).print_help()
         return 0
+    if getattr(args, "password_stdin", False) and getattr(args, "password", None) is not None:
+        parser.error("password and --password-stdin cannot be combined")
     try:
+        if getattr(args, "password_stdin", False):
+            if sys.stdin.isatty():
+                raise RuntimeError("--password-stdin requires a pipe or file redirect")
+            password = sys.stdin.read().removesuffix("\n").removesuffix("\r")
+            if not password or "\n" in password or "\r" in password:
+                raise ValueError("--password-stdin requires one nonempty password line")
+            args.password = password
+        if getattr(args, "message", None) == "-":
+            if sys.stdin.isatty():
+                raise RuntimeError("message - requires a pipe or file redirect")
+            args.message = sys.stdin.read().removesuffix("\n").removesuffix("\r")
+            if not args.message.strip():
+                raise ValueError("message from stdin must not be empty")
         if args.command == "chat" and not (sys.stdin.isatty() and sys.stdout.isatty()):
             raise RuntimeError("chat requires an interactive terminal; use `bitchat daemon start`, `bitchat send`, and `bitchat inbox` in scripts")
         if hasattr(args, "async_handler"):
