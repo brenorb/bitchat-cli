@@ -7,15 +7,16 @@ from .state import RuntimePaths
 
 
 class DaemonClient:
-    def __init__(self, runtime: RuntimePaths) -> None:
+    def __init__(self, runtime: RuntimePaths, *, timeout_seconds: float = 30.0) -> None:
         self.runtime = runtime
+        self.timeout_seconds = timeout_seconds
 
     def send_command(self, payload: dict[str, object]) -> dict[str, object]:
         if not self.runtime.daemon_socket_path.exists():
             raise RuntimeError("daemon socket not found; start `bitchat daemon start` first")
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            client.settimeout(30.0)
+            client.settimeout(self.timeout_seconds)
             client.connect(str(self.runtime.daemon_socket_path))
             client.sendall((json.dumps(payload) + "\n").encode("utf-8"))
             response = b""

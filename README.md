@@ -79,6 +79,11 @@ machine. The central BLE transport uses `bleak`; the macOS peripheral endpoint
 is enabled only when CoreBluetooth, Foundation, and the PyObjC bridge are
 available.
 
+Daemon startup succeeds only after the command socket confirms that transport
+and relay initialization completed (up to 10 seconds). A failed startup exits 1
+with the log path and removes its runtime files. Starting an already running
+daemon succeeds without launching another process.
+
 ## Help, scripts, and configuration
 
 Run `bitchat` for the command overview, `bitchat help geo` for a command group,
@@ -340,3 +345,9 @@ This client follows the public protocol behavior of the official projects:
 The implementation is intentionally narrow and aims to make its limits visible:
 read the source and run `doctor`, `selftest`, and the relevant `--help` output
 before relying on a feature.
+
+## Installed end-to-end validation
+
+See [docs/e2e-validation.md](docs/e2e-validation.md) for actual installed-command,
+daemon/socket and persisted-data checks with isolated identities and controlled
+local transports. These tests do not send public radio or relay messages.

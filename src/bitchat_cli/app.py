@@ -825,6 +825,7 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
         store.save(state)
         network_config = NetworkConfig.from_state(state)
     transport_ref: dict[str, BLEChatTransport] = {}
+    daemon_ready = False
     nostr_identity = _resolve_nostr_identity(state)
     geohash_watch_identities: dict[str, tuple[str, NostrIdentity]] = {}
 
@@ -1371,6 +1372,7 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
                     response = {
                         "ok": True,
                         "runtime": {
+                            "ready": daemon_ready,
                             "connected_links": len(transport.clients),
                             "known_peers": len(transport.known_peers),
                             "peripheral_advertising": transport.peripheral_endpoint.is_advertising(),
@@ -1443,6 +1445,7 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
         await geochat.start(state.watched_geohashes)
         await sync_geohash_dm_watchers()
         await nostr_client.start()
+        daemon_ready = True
         await stop_event.wait()
         daemon_log("Daemon stopping.")
     finally:
@@ -1470,11 +1473,6 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
 def run_daemon_start(args: argparse.Namespace) -> int:
     runtime = RuntimePaths()
     runtime.ensure()
-    session = ActiveSessionLease(runtime.radio_pid_path)
-    owner_pid = session.read_owner_pid()
-    if owner_pid is not None and pid_is_running(owner_pid):
-        print(f"another bitchat BLE session is already running (pid {owner_pid})", file=sys.stderr)
-        return 1
     if runtime.daemon_pid_path.exists():
         try:
             existing_pid = int(runtime.daemon_pid_path.read_text().strip())
@@ -1484,6 +1482,12 @@ def run_daemon_start(args: argparse.Namespace) -> int:
             print(f"daemon already running (pid {existing_pid})")
             return 0
         runtime.daemon_pid_path.unlink(missing_ok=True)
+
+    session = ActiveSessionLease(runtime.radio_pid_path)
+    owner_pid = session.read_owner_pid()
+    if owner_pid is not None and pid_is_running(owner_pid):
+        print(f"another bitchat BLE session is already running (pid {owner_pid})", file=sys.stderr)
+        return 1
 
     command = [
         sys.executable,
@@ -1516,12 +1520,42 @@ def run_daemon_start(args: argparse.Namespace) -> int:
     )
     log_handle.close()
     runtime.daemon_pid_path.write_text(f"{process.pid}\n", encoding="utf-8")
+    if not _wait_for_daemon_ready(runtime, process):
+        # This is our newly spawned child, not an arbitrary PID from a cache.
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        _clear_daemon_runtime_files(runtime, process.pid)
+        runtime.daemon_socket_path.unlink(missing_ok=True)
+        print(f"daemon failed to start; inspect {runtime.daemon_log_path}", file=sys.stderr)
+        return 1
     print(f"daemon started (pid {process.pid})")
     print(f"log: {runtime.daemon_log_path}")
     print(f"socket: {runtime.daemon_socket_path}")
     print(f"inbox: {runtime.inbox_path}")
     print(f"peers: {runtime.peers_path}")
     return 0
+
+
+def _wait_for_daemon_ready(runtime: RuntimePaths, process, *, timeout_seconds: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            return False
+        if runtime.daemon_socket_path.exists():
+            try:
+                status = DaemonClient(runtime, timeout_seconds=min(0.2, max(0.001, deadline - time.monotonic()))).runtime_status()
+            except RuntimeError:
+                pass
+            else:
+                if status.get("ready") is True and process.poll() is None:
+                    return True
+        time.sleep(0.05)
+    return False
 
 
 def _clear_daemon_runtime_files(runtime: RuntimePaths, pid: int) -> None:
