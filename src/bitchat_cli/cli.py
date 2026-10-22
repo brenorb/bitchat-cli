@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import math
+import os
 import sys
 from importlib.metadata import version
 
@@ -472,9 +473,27 @@ def main(argv: list[str] | None = None) -> int:
     if not hasattr(args, "handler") and not hasattr(args, "async_handler"):
         _help_parser(parser, argv).print_help()
         return 0
-    if hasattr(args, "async_handler"):
-        return asyncio.run(args.async_handler(args))
-    return args.handler(args)
+    try:
+        if args.command == "chat" and not (sys.stdin.isatty() and sys.stdout.isatty()):
+            raise RuntimeError("chat requires an interactive terminal; use `bitchat daemon start`, `bitchat send`, and `bitchat inbox` in scripts")
+        if hasattr(args, "async_handler"):
+            result = asyncio.run(args.async_handler(args))
+        else:
+            result = args.handler(args)
+        sys.stdout.flush()
+        return result
+    except BrokenPipeError:
+        # Avoid another failure during Python's final flush of a closed pipe.
+        if sys.stdout is sys.__stdout__:
+            with open(os.devnull, "w") as null:
+                os.dup2(null.fileno(), sys.stdout.fileno())
+        return 0
+    except KeyboardInterrupt:
+        print("bitchat: interrupted", file=sys.stderr)
+        return 130
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"bitchat: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

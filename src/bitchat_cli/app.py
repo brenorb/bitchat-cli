@@ -442,7 +442,7 @@ async def run_chat(args: argparse.Namespace) -> int:
     session = ActiveSessionLease(runtime.radio_pid_path)
     acquired, owner_pid = session.acquire()
     if not acquired:
-        print(f"another bitchat BLE session is already running (pid {owner_pid})")
+        print(f"another bitchat BLE session is already running (pid {owner_pid})", file=sys.stderr)
         return 1
 
     store = StateStore(runtime.state_path)
@@ -455,7 +455,7 @@ async def run_chat(args: argparse.Namespace) -> int:
     transport_ref: dict[str, BLEChatTransport] = {}
 
     def system_log(message: str) -> None:
-        print(f"[system] {message}", flush=True)
+        print(f"[system] {message}", file=sys.stderr, flush=True)
 
     def message_log(
         sender: str,
@@ -662,7 +662,7 @@ async def run_chat(args: argparse.Namespace) -> int:
                     try:
                         peer = _resolve_peer_target(transport, target)
                     except ValueError as exc:
-                        print(str(exc))
+                        print(str(exc), file=sys.stderr)
                         continue
                     timestamp = datetime.now(timezone.utc)
                     message_id = await transport.send_private_message(peer.peer_id, body.strip())
@@ -697,10 +697,8 @@ async def run_chat(args: argparse.Namespace) -> int:
                 peer_id=state.identity.peer_id,
             )
             print(f"[{now}] <{state.nickname}> {text}")
-    except asyncio.CancelledError:
-        pass
-    except KeyboardInterrupt:
-        pass
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        return 130
     finally:
         if "stdin_transport" in locals():
             stdin_transport.close()
@@ -813,7 +811,7 @@ async def run_daemon_foreground(args: argparse.Namespace) -> int:
     session = ActiveSessionLease(runtime.radio_pid_path)
     acquired, owner_pid = session.acquire()
     if not acquired:
-        print(f"another bitchat BLE session is already running (pid {owner_pid})")
+        print(f"another bitchat BLE session is already running (pid {owner_pid})", file=sys.stderr)
         return 1
 
     store = StateStore(runtime.state_path)
@@ -1475,7 +1473,7 @@ def run_daemon_start(args: argparse.Namespace) -> int:
     session = ActiveSessionLease(runtime.radio_pid_path)
     owner_pid = session.read_owner_pid()
     if owner_pid is not None and pid_is_running(owner_pid):
-        print(f"another bitchat BLE session is already running (pid {owner_pid})")
+        print(f"another bitchat BLE session is already running (pid {owner_pid})", file=sys.stderr)
         return 1
     if runtime.daemon_pid_path.exists():
         try:
@@ -1784,7 +1782,7 @@ def run_social_link(args: argparse.Namespace) -> int:
         peer = _resolve_peer_record(peer_rows, args.target)
         nostr_pubkey_hex = decode_npub(args.npub)
     except (ValueError, RuntimeError) as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     _social_store(runtime).upsert(
         peer_id=str(peer["peer_id"]),
@@ -1801,7 +1799,7 @@ def run_social_unlink(args: argparse.Namespace) -> int:
     try:
         record = _resolve_peer_or_social_target(runtime, args.target)
     except ValueError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     _social_store(runtime).delete(str(record["peer_id"]))
     print(f"removed social link for {record['peer_id']}")
@@ -1813,7 +1811,7 @@ def _toggle_social_flag(args: argparse.Namespace, *, favorite: bool | None = Non
     try:
         record = _resolve_peer_or_social_target(runtime, args.target)
     except ValueError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     row = _social_store(runtime).upsert(
         peer_id=str(record["peer_id"]),
@@ -1858,7 +1856,7 @@ def run_social_fingerprint(args: argparse.Namespace) -> int:
             social_row = _resolve_social_record(_social_store(runtime).read_all(), args.target)
             peer = {"peer_id": social_row["peer_id"], "nickname": social_row.get("nickname") or social_row["peer_id"]}
         except ValueError as exc:
-            print(str(exc))
+            print(str(exc), file=sys.stderr)
             return 1
     social_row = social_row or _social_store(runtime).get(str(peer["peer_id"]))
     print(f"peer_id:           {peer['peer_id']}")
@@ -1885,7 +1883,7 @@ def run_social_verify(args: argparse.Namespace) -> int:
     try:
         record = _resolve_peer_or_social_target(runtime, args.target)
     except ValueError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     social = _social_store(runtime)
     existing = social.get(str(record["peer_id"])) or {}
@@ -1893,22 +1891,22 @@ def run_social_verify(args: argparse.Namespace) -> int:
         try:
             payload = VerificationPayload.from_url(args.payload)
         except ValueError as exc:
-            print(str(exc))
+            print(str(exc), file=sys.stderr)
             return 1
         if not verify_verification_payload(payload):
-            print("verification payload did not validate")
+            print("verification payload did not validate", file=sys.stderr)
             return 1
         expected_noise = str(record.get("noise_public_key") or "")
         expected_sign = str(record.get("signing_public_key") or "")
         expected_npub = str(existing.get("nostr_npub") or "")
         if expected_noise and payload.noise_key_hex.lower() != expected_noise.lower():
-            print("verification payload noise key does not match the selected peer")
+            print("verification payload noise key does not match the selected peer", file=sys.stderr)
             return 1
         if expected_sign and payload.sign_key_hex.lower() != expected_sign.lower():
-            print("verification payload signing key does not match the selected peer")
+            print("verification payload signing key does not match the selected peer", file=sys.stderr)
             return 1
         if expected_npub and payload.npub and payload.npub != expected_npub:
-            print("verification payload npub does not match the selected peer")
+            print("verification payload npub does not match the selected peer", file=sys.stderr)
             return 1
     row = social.upsert(
         peer_id=str(record["peer_id"]),
@@ -1926,7 +1924,7 @@ def run_social_unverify(args: argparse.Namespace) -> int:
     try:
         record = _resolve_peer_or_social_target(runtime, args.target)
     except ValueError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     existing = _social_store(runtime).get(str(record["peer_id"])) or {}
     row = _social_store(runtime).upsert(
@@ -1959,7 +1957,7 @@ def run_network_proxy_set(args: argparse.Namespace) -> int:
     try:
         mode, proxy_url = resolve_proxy_target(args.target)
     except ValueError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     state.network_proxy_mode = mode
     state.network_proxy_url = proxy_url
@@ -2009,7 +2007,7 @@ def run_dm_send(args: argparse.Namespace) -> int:
     try:
         peer = _resolve_peer_or_social_target(runtime, args.target)
     except ValueError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     try:
         response = DaemonClient(runtime).send_dm(
@@ -2017,7 +2015,7 @@ def run_dm_send(args: argparse.Namespace) -> int:
             content=args.message,
         )
     except RuntimeError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     route = str(response.get("route") or response.get("transport") or "auto")
     delivery_state = str(response.get("delivery_state") or "")
@@ -2031,7 +2029,7 @@ def run_dm_send_file(args: argparse.Namespace) -> int:
     try:
         peer = _resolve_peer_or_social_target(runtime, args.target)
     except ValueError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     try:
         response = DaemonClient(runtime).send_dm_file(
@@ -2039,7 +2037,7 @@ def run_dm_send_file(args: argparse.Namespace) -> int:
             path=args.path,
         )
     except RuntimeError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     print(f"queued file {response['transfer_id']} to {peer['nickname']} ({peer['peer_id']})")
     return 0
@@ -2050,7 +2048,7 @@ def run_send(args: argparse.Namespace) -> int:
     try:
         DaemonClient(runtime).send_public(content=args.message)
     except RuntimeError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     print("queued public message")
     return 0
@@ -2061,7 +2059,7 @@ def run_send_file(args: argparse.Namespace) -> int:
     try:
         response = DaemonClient(runtime).send_public_file(path=args.path)
     except RuntimeError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     print(f"queued public file {response['transfer_id']}")
     return 0
@@ -2072,17 +2070,17 @@ def run_geo_send(args: argparse.Namespace) -> int:
     try:
         geohash = _normalize_geo_target(args.geohash)
     except RuntimeError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     warning = _geohash_privacy_warning(geohash)
     force = bool(getattr(args, "force", False))
     if warning is not None and len(geohash) >= _HIGH_PRECISION_GEOHASH_WARNING_LENGTH and not force:
-        print(warning)
+        print(warning, file=sys.stderr)
         return 1
     if warning is not None and len(geohash) == _MEDIUM_PRECISION_GEOHASH_WARNING_LENGTH and not force:
-        print(warning)
+        print(warning, file=sys.stderr)
     if int(args.pow) < 0:
-        print("pow difficulty must be non-negative")
+        print("pow difficulty must be non-negative", file=sys.stderr)
         return 1
     try:
         DaemonClient(runtime).send_geo(
@@ -2092,7 +2090,7 @@ def run_geo_send(args: argparse.Namespace) -> int:
             teleported=bool(args.teleport),
         )
     except RuntimeError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     print(f"queued geohash message to #{geohash}")
     return 0
@@ -2103,15 +2101,15 @@ def run_geo_watch_add(args: argparse.Namespace) -> int:
     try:
         geohash = _normalize_geo_target(args.geohash)
     except RuntimeError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     warning = _geohash_privacy_warning(geohash)
     force = bool(getattr(args, "force", False))
     if warning is not None and len(geohash) >= _HIGH_PRECISION_GEOHASH_WARNING_LENGTH and not force:
-        print(warning)
+        print(warning, file=sys.stderr)
         return 1
     if warning is not None and len(geohash) == _MEDIUM_PRECISION_GEOHASH_WARNING_LENGTH and not force:
-        print(warning)
+        print(warning, file=sys.stderr)
     store = StateStore(runtime.state_path)
     state = store.load()
     watched = sorted(set(state.watched_geohashes) | {geohash})
@@ -2130,7 +2128,7 @@ def run_geo_watch_remove(args: argparse.Namespace) -> int:
     try:
         geohash = _normalize_geo_target(args.geohash)
     except RuntimeError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     store = StateStore(runtime.state_path)
     state = store.load()
@@ -2198,7 +2196,7 @@ def run_geo_channel_set(args: argparse.Namespace) -> int:
     try:
         geohash = _normalize_geo_target(args.geohash)
     except RuntimeError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     store = StateStore(runtime.state_path)
     state = store.load()
@@ -2235,7 +2233,7 @@ def run_geo_channel_show(args: argparse.Namespace) -> int:
     try:
         payload = _geohash_channel_summary(runtime, args.geohash)
     except ValueError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     if args.json:
         print(json.dumps(payload, indent=2))
@@ -2297,7 +2295,7 @@ def run_geo_notes_add(args: argparse.Namespace) -> int:
             )
         )
     except Exception as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     print(f"published location note {event['id']}")
     return 0
@@ -2316,7 +2314,7 @@ def run_geo_notes_list(args: argparse.Namespace) -> int:
             )
         )
     except Exception as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     payload = [
         {
@@ -2347,7 +2345,7 @@ def run_geo_participant_show(args: argparse.Namespace) -> int:
     try:
         record = _ensure_geo_participant_record(runtime, geohash=args.geohash, target=args.target)
     except ValueError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     print(f"peer_id:           {record['peer_id']}")
     print(f"nickname:          {record.get('nickname') or '-'}")
@@ -2363,7 +2361,7 @@ def run_geo_participant_block(args: argparse.Namespace) -> int:
     try:
         record = _ensure_geo_participant_record(runtime, geohash=args.geohash, target=args.target, allow_unseen=True)
     except ValueError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     row = _social_store(runtime).upsert(
         peer_id=str(record["peer_id"]),
@@ -2380,7 +2378,7 @@ def run_geo_participant_unblock(args: argparse.Namespace) -> int:
     try:
         record = _ensure_geo_participant_record(runtime, geohash=args.geohash, target=args.target, allow_unseen=True)
     except ValueError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     row = _social_store(runtime).upsert(
         peer_id=str(record["peer_id"]),
@@ -2403,7 +2401,7 @@ def run_geo_dm_send(args: argparse.Namespace) -> int:
             content=args.message,
         )
     except (RuntimeError, ValueError) as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     print(f"queued geo dm {response['message_id']} to {participant.get('nickname') or participant['peer_id']} in #{geohash}")
     return 0
@@ -2415,7 +2413,7 @@ def run_geo_dm_history(args: argparse.Namespace) -> int:
         geohash = _normalize_geo_target(args.geohash)
         participant = _ensure_geo_participant_record(runtime, geohash=geohash, target=args.target, allow_unseen=True)
     except ValueError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     participant_key = str(participant.get("nostr_pubkey_hex") or participant["peer_id"])
     conversation_id = f"{geohash}:{participant_key}"
@@ -2447,7 +2445,7 @@ def run_topic_join(args: argparse.Namespace) -> int:
     try:
         channel = _normalize_topic_channel(args.channel)
     except ValueError as exc:
-        print(str(exc))
+        print(str(exc), file=sys.stderr)
         return 1
     store = StateStore(runtime.state_path)
     state = store.load()
