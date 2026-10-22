@@ -6,6 +6,7 @@ sends radio or public relay traffic. Installed wheels need no testing switches.
 import os
 
 if os.environ.get('BITCHAT_E2E_CONTROLLED') == '1':
+    import asyncio
     import json
     from datetime import datetime, timezone
     from pathlib import Path
@@ -16,6 +17,8 @@ if os.environ.get('BITCHAT_E2E_CONTROLLED') == '1':
 
     class LocalTransport(BLEChatTransport):
         async def start(self):
+            if delay := os.environ.get('BITCHAT_E2E_DELAY_START'):
+                await asyncio.sleep(float(delay))
             if os.environ.get('BITCHAT_E2E_FAIL_START') == '1':
                 raise RuntimeError('controlled BLE startup failure')
             peer = Identity.generate()

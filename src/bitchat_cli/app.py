@@ -1479,8 +1479,18 @@ def run_daemon_start(args: argparse.Namespace) -> int:
         except ValueError:
             existing_pid = None
         if existing_pid is not None and pid_is_running(existing_pid):
-            print(f"daemon already running (pid {existing_pid})")
-            return 0
+            try:
+                existing_status = DaemonClient(runtime, timeout_seconds=0.2).runtime_status()
+            except RuntimeError:
+                existing_status = {}
+            if existing_status.get("ready") is True:
+                print(f"daemon already running (pid {existing_pid})")
+                return 0
+            print(
+                f"recorded daemon is not ready (pid {existing_pid}); inspect `bitchat daemon status` and {runtime.daemon_log_path} before stopping or retrying",
+                file=sys.stderr,
+            )
+            return 1
         runtime.daemon_pid_path.unlink(missing_ok=True)
 
     session = ActiveSessionLease(runtime.radio_pid_path)

@@ -82,7 +82,10 @@ available.
 Daemon startup succeeds only after the command socket confirms that transport
 and relay initialization completed (up to 10 seconds). A failed startup exits 1
 with the log path and removes its runtime files. Starting an already running
-daemon succeeds without launching another process.
+ready daemon succeeds without launching another process. A live cached PID
+without a ready socket returns an error and is preserved for inspection; it
+is never terminated by `daemon start`. Older daemons without the readiness
+field should be stopped and restarted after upgrading.
 
 ## Help, scripts, and configuration
 

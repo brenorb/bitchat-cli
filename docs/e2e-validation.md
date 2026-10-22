@@ -16,6 +16,7 @@ are transmitted. The installed wheel has no test-mode switch.
 The tests cover:
 
 - Start, repeat start, status, socket readiness, and complete PID/socket/lease cleanup.
+- Rejecting unrelated cached PIDs and concurrent starts before readiness without signalling them.
 - A failed transport startup returning failure instead of a premature success.
 - Piped message text reaching the real daemon and its persisted outbound log.
 - A signed local peer reply appearing in the installed JSON inbox command.

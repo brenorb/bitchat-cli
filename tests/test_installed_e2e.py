@@ -130,3 +130,48 @@ def test_installed_daemon_reports_startup_failure(installed):
     assert failed.stdout == ''
     assert 'failed to start' in failed.stderr
     assert not any((root / name).exists() for name in ('daemon.pid', 'daemon.sock', 'radio.pid'))
+
+
+def test_installed_start_does_not_trust_an_unrelated_cached_pid(installed):
+    invoke, root, _env, _binary = installed
+    root.mkdir()
+    pid_file = root / 'daemon.pid'
+    pid_file.write_text(str(os.getpid()))
+    try:
+        result = invoke('daemon', 'start')
+        assert result.returncode == 1
+        assert result.stdout == ''
+        assert 'not ready' in result.stderr
+        os.kill(os.getpid(), 0)
+        assert not (root / 'daemon.sock').exists()
+        assert pid_file.read_text() == str(os.getpid())
+    finally:
+        # This belongs to the test runner, never ask daemon stop to signal it.
+        pid_file.unlink(missing_ok=True)
+
+
+def test_installed_repeat_start_waits_for_actual_daemon_readiness(installed):
+    invoke, root, env, binary = installed
+    env['BITCHAT_E2E_DELAY_START'] = '2'
+    first = subprocess.Popen([binary, 'daemon', 'start'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if (root / 'daemon.sock').exists():
+                runtime = socket_command(root / 'daemon.sock', {'command': 'runtime_status'})
+                assert runtime['runtime']['ready'] is False
+                break
+            time.sleep(.02)
+        else:
+            pytest.fail('delayed startup never exposed its real command socket')
+        repeated = invoke('daemon', 'start')
+        assert repeated.returncode == 1
+        assert repeated.stdout == ''
+        assert 'not ready' in repeated.stderr
+        out, err = first.communicate(timeout=5)
+        assert first.returncode == 0, (out, err)
+        wait_ready(invoke, root)
+    finally:
+        if first.poll() is None:
+            first.kill()
+        first.communicate(timeout=5)
