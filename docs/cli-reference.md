@@ -174,8 +174,8 @@ Exit statuses are 0 for success, help, and version; 1 for operational errors;
 2 for invalid arguments; and 130 when a foreground command is interrupted.
 A downstream program closing a pipe ends output quietly with status 0.
 `network proxy test` returns 1 when the configured proxy is unhealthy while
-still emitting its requested status result. `daemon status` returns 1 for a
-missing/stale daemon and prints the status result. A quiet command overview
+still emitting its requested status result. `daemon status` returns 0 when no daemon is recorded and 1 for an
+invalid/stale PID file, while printing the status result. A quiet command overview
 or group invocation, such as `bitchat geo channel`, prints help and returns 0.
 Missing operands on a leaf command print usage and return 2.
 
