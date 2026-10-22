@@ -40,9 +40,15 @@ class DaemonClient:
             raise RuntimeError("invalid response from daemon; inspect `bitchat daemon status`") from exc
         if not isinstance(decoded, dict):
             raise RuntimeError("invalid response from daemon; expected a JSON object")
-        if not decoded.get("ok", False):
+        if decoded.get("ok") is not True:
             raise RuntimeError(str(decoded.get("error") or "daemon command failed"))
         return decoded
+
+    def _send_with_identifier(self, key: str, payload: dict[str, object]) -> dict[str, object]:
+        response = self.send_command(payload)
+        if not isinstance(response.get(key), str) or not response[key]:
+            raise RuntimeError(f"invalid response from daemon: missing {key}; inspect `bitchat daemon status` before retrying (a send may already be queued)")
+        return response
 
     def runtime_status(self) -> dict[str, object]:
         response = self.send_command({"command": "runtime_status"})
@@ -50,7 +56,7 @@ class DaemonClient:
         return runtime_status if isinstance(runtime_status, dict) else {}
 
     def send_dm(self, *, peer_id: str, content: str) -> dict[str, object]:
-        return self.send_command(
+        return self._send_with_identifier("message_id",
             {
                 "command": "dm_send",
                 "peer_id": peer_id,
@@ -59,7 +65,7 @@ class DaemonClient:
         )
 
     def send_dm_file(self, *, peer_id: str, path: str) -> dict[str, object]:
-        return self.send_command(
+        return self._send_with_identifier("transfer_id",
             {
                 "command": "dm_send_file",
                 "peer_id": peer_id,
@@ -76,7 +82,7 @@ class DaemonClient:
         )
 
     def send_public_file(self, *, path: str) -> dict[str, object]:
-        return self.send_command(
+        return self._send_with_identifier("transfer_id",
             {
                 "command": "public_send_file",
                 "path": path,
@@ -102,7 +108,7 @@ class DaemonClient:
         )
 
     def send_geo_dm(self, *, geohash: str, peer_pubkey: str, content: str) -> dict[str, object]:
-        return self.send_command(
+        return self._send_with_identifier("message_id",
             {
                 "command": "geo_dm_send",
                 "geohash": geohash,

@@ -61,3 +61,16 @@ def test_invalid_or_incomplete_daemon_response_is_actionable(tmp_path, monkeypat
     with pytest.raises(RuntimeError, match='invalid.*daemon|incomplete.*daemon'):
         client.send_command({'command': 'runtime_status'})
     assert fake.closed
+
+
+@pytest.mark.parametrize('command,kwargs', [
+    ('send_dm', {'peer_id': 'peer', 'content': 'hello'}),
+    ('send_dm_file', {'peer_id': 'peer', 'path': 'demo.txt'}),
+    ('send_public_file', {'path': 'demo.txt'}),
+    ('send_geo_dm', {'geohash': 'u4pru', 'peer_pubkey': 'peer', 'content': 'hello'}),
+])
+def test_success_reply_requires_command_identifier(tmp_path, monkeypatch, command, kwargs):
+    client, fake = client_with_socket(tmp_path, monkeypatch)
+    with pytest.raises(RuntimeError, match='invalid.*daemon.*status'):
+        getattr(client, command)(**kwargs)
+    assert fake.closed
