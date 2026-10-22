@@ -361,3 +361,16 @@ def test_failed_atomic_state_save_preserves_previous_file(tmp_path, monkeypatch)
         store.save(state)
     assert store.path.read_bytes() == original
     assert list(tmp_path.iterdir()) == [store.path]
+
+
+def test_invalid_optional_identity_or_collections_preserve_state(tmp_path):
+    import json
+    import pytest
+    store = StateStore(tmp_path / 'state.json')
+    valid = store.load().to_json()
+    for key, value in [('nostr_relays', None), ('watched_geohashes', 3), ('noise_private_key', 42), ('nostr_device_seed', 'bad'), ('nostr_private_key', '00' * 32)]:
+        contents = json.dumps({**valid, key: value})
+        store.path.write_text(contents)
+        with pytest.raises(ValueError, match='invalid state file.*backup'):
+            store.load()
+        assert store.path.read_text() == contents

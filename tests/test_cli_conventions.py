@@ -183,3 +183,21 @@ def test_real_closed_pipe_exits_cleanly():
         os.close(writer)
     assert result.returncode == 0
     assert result.stderr == ''
+
+
+@pytest.mark.parametrize('contents', ['{}', '[]', '{invalid', '{"nickname": false}'])
+def test_invalid_state_has_actionable_error_and_preserves_identity(tmp_path, contents):
+    import os
+    import subprocess
+    import sys
+    path = tmp_path / 'bitchat' / 'state.json'
+    path.parent.mkdir()
+    path.write_text(contents)
+    for command in [('doctor', '--json'), ('topic', 'list', '--json')]:
+        result = subprocess.run([sys.executable, '-m', 'bitchat_cli.cli', *command], env=dict(os.environ, XDG_CONFIG_HOME=str(tmp_path)), capture_output=True, text=True)
+        assert result.returncode == 1
+        assert result.stdout == ''
+        assert 'Traceback' not in result.stderr
+        assert str(path) in result.stderr
+        assert 'backup' in result.stderr
+        assert path.read_text() == contents

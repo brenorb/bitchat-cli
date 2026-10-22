@@ -128,7 +128,13 @@ class StateStore:
             state = AppState.create()
             self.save(state)
             return state
-        data = json.loads(self.path.read_text())
+        try:
+            data = json.loads(self.path.read_text())
+            self._validate_data(data)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"invalid state file {self.path}: {exc}; restore a backup or correct the file, preserving private identity keys"
+            ) from exc
         nostr_private_key_hex = str(data.get("nostr_private_key") or "")
         if len(nostr_private_key_hex) != 64:
             nostr_private_key_hex = PrivateKey().to_hex()
@@ -176,6 +182,31 @@ class StateStore:
         ):
             self.save(state)
         return state
+
+    @staticmethod
+    def _validate_data(data: object) -> None:
+        if not isinstance(data, dict):
+            raise ValueError("expected a JSON object")
+        if not isinstance(data.get("nickname"), str):
+            raise ValueError("nickname must be a string")
+        for key in ("noise_private_key", "signing_private_key", "nostr_device_seed", "nostr_private_key"):
+            if key in ("nostr_device_seed", "nostr_private_key") and key not in data:
+                continue  # Migrate legacy identities only when the field is absent.
+            value = data.get(key)
+            if not isinstance(value, str) or len(value) != 64:
+                raise ValueError(f"{key} must be a 32-byte hexadecimal key")
+            try:
+                bytes.fromhex(value)
+                if key == "nostr_private_key":
+                    PrivateKey.from_hex(value)
+            except ValueError:
+                raise ValueError(f"{key} is invalid") from None
+        for key in ("nostr_relays", "watched_geohashes"):
+            if key in data and (not isinstance(data[key], list) or not all(isinstance(item, str) for item in data[key])):
+                raise ValueError(f"{key} must be an array of strings")
+        for key in ("geohash_channels", "topic_channels"):
+            if key in data and not isinstance(data[key], dict):
+                raise ValueError(f"{key} must be an object")
 
     def save(self, state: AppState) -> None:
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
