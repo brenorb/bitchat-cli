@@ -145,3 +145,41 @@ def test_help_rejects_unknown_nested_command(capsys):
         cli.main(['help', 'geo', 'typo'])
     assert exc.value.code == 2
     assert 'typo' in capsys.readouterr().err
+
+
+def test_installed_cli_contract_with_isolated_config(tmp_path):
+    import json
+    import os
+    import subprocess
+    import sys
+    env = dict(os.environ, XDG_CONFIG_HOME=str(tmp_path))
+    def invoke(*argv):
+        return subprocess.run([sys.executable, '-m', 'bitchat_cli.cli', *argv], env=env, text=True, capture_output=True)
+    for argv in [(), ('--version',), ('--help',), ('help', 'geo', 'encode')]:
+        result = invoke(*argv)
+        assert result.returncode == 0
+        assert result.stdout
+        assert result.stderr == ''
+    assert not (tmp_path / 'bitchat').exists()
+    result = invoke('geo', 'encode', '--lat', '37.7', '--lon', '-122.4', '--json')
+    assert result.returncode == 0
+    assert json.loads(result.stdout)['city']
+    assert result.stderr == ''
+    result = invoke('geo', 'decode', '!', '--json')
+    assert result.returncode == 1
+    assert result.stdout == ''
+    assert 'invalid geohash' in result.stderr
+
+
+def test_real_closed_pipe_exits_cleanly():
+    import os
+    import subprocess
+    import sys
+    reader, writer = os.pipe()
+    os.close(reader)
+    try:
+        result = subprocess.run([sys.executable, '-m', 'bitchat_cli.cli', '--help'], stdout=writer, stderr=subprocess.PIPE, text=True)
+    finally:
+        os.close(writer)
+    assert result.returncode == 0
+    assert result.stderr == ''
