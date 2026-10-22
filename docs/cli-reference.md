@@ -4,7 +4,10 @@ This reference mirrors the command tree in `src/bitchat_cli/cli.py`. The
 authoritative runtime help is always available from the installed command:
 
 ```bash
+bitchat
+bitchat --version
 bitchat --help
+bitchat help geo
 bitchat <command> --help
 bitchat <command> <subcommand> --help
 ```
@@ -150,10 +153,10 @@ fallback for text and receipts. Files use BLE only.
 ## Local topic metadata
 
 ```text
-bitchat topic join CHANNEL [--password PASSWORD] [--retain]
+bitchat topic join CHANNEL [--password PASSWORD | --password-stdin] [--retain]
 bitchat topic leave CHANNEL
 bitchat topic list [--json]
-bitchat topic password CHANNEL [PASSWORD]
+bitchat topic password CHANNEL [PASSWORD | --password-stdin]
 bitchat topic retain CHANNEL on|off
 ```
 
@@ -162,11 +165,48 @@ not add a second public transport or cause the daemon to join a remote topic.
 
 ## Output and state conventions
 
-- Human-readable output is the default.
-- Where supported, `--json` prints structured data on stdout.
-- Commands that need the daemon use its local Unix socket and return an error if
-  it is unavailable.
-- State lives under the active app directory reported by `bitchat doctor`; the
-  default is `~/.config/bitchat/`, with legacy reuse of `~/.config/bitchat-cli/`.
-- `--help` is the source of truth if this reference and the installed build ever
-  diverge.
+Results and explicit help use stdout. Errors, geohash privacy warnings, network
+lookup notices, and interactive chat system logs use stderr. Read commands
+that list `--json` produce a JSON document on stdout, including empty results.
+Topic JSON omits the stored password and retains `password_set` metadata.
+
+Exit statuses are 0 for success, help, and version; 1 for operational errors;
+2 for invalid arguments; and 130 when a foreground command is interrupted.
+A downstream program closing a pipe ends output quietly with status 0.
+`network proxy test` returns 1 when the configured proxy is unhealthy while
+still emitting its requested status result. `daemon status` returns 1 for a
+missing/stale daemon and prints the status result. A quiet command overview
+or group invocation, such as `bitchat geo channel`, prints help and returns 0.
+Missing operands on a leaf command print usage and return 2.
+
+Long flag names must be written in full. `--tail` and `--limit` accept positive
+integers; scan intervals must be positive finite seconds; proof-of-work bits
+must be nonnegative. Opposing bookmark/selection/teleport flags and
+`--level`/`--all-levels` are mutually exclusive. Use `--` before a positional
+argument starting with `-`, such as `bitchat mesh send -- '-hello'`.
+
+Every message or note body accepts `-` to read piped UTF-8 text from stdin.
+One final newline is removed, embedded newlines are retained, and an empty
+message is rejected. Literal `-` is reserved for stdin. File transfers require
+a local file path. `--password-stdin` reads a single nonempty password line
+from a pipe or redirect; combine it with neither `--password` nor a positional
+password. Omitting the password from `topic password CHANNEL` still clears it.
+Legacy password arguments can be exposed through shell history/process listings.
+
+`chat` requires terminal stdin and stdout and supports `/quit` and Ctrl-C.
+Use `daemon start`, `send`, and `inbox` for automation. Short-lived commands do
+not prompt. Socket operations time out after 30 seconds without progress; a
+send might already have been accepted when the client times out. Inspect
+`bitchat daemon status` and the inbox before deciding whether to retry.
+
+With an absolute `XDG_CONFIG_HOME`, all state/runtime files live under
+`$XDG_CONFIG_HOME/bitchat/`. Otherwise use `~/.config/bitchat/`, with existing
+`~/.config/bitchat-cli/` reused when appropriate. Empty or relative XDG values
+fall back to the default. Explicit XDG configuration does not migrate an old
+identity or daemon. `doctor` reports the effective paths. Newly created app
+directories use mode 0700; state saves replace the file atomically with mode
+0600 on POSIX. Existing directories keep their permissions. State contains
+private keys and local topic passwords; protect backups too.
+
+`--help` describes the installed build. Documentation and support links are
+included in the top-level help. No analytics or update checks are added.
