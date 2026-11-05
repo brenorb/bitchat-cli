@@ -6,7 +6,9 @@ import io
 from datetime import datetime, timezone
 from pathlib import Path
 
-from bitchat_cli import app, geochat
+import pytest
+
+from bitchat_cli import app, cli, geochat
 from bitchat_cli.crypto import Identity
 from bitchat_cli.peripheral import NullPeripheralEndpoint
 from bitchat_cli.state import MessageStore, PeerStore, RuntimePaths
@@ -1091,14 +1093,15 @@ def test_run_topic_join_persists_local_topic_metadata(tmp_path: Path, monkeypatc
     assert state.topic_channels["#btc"]["retention"] is True
 
 
-def test_run_send_uses_daemon_command(tmp_path: Path, monkeypatch, capsys) -> None:
+@pytest.mark.parametrize("command", [("send",), ("mesh", "send")])
+def test_send_reports_local_acceptance(tmp_path: Path, monkeypatch, capsys, command: tuple[str, ...]) -> None:
     runtime = RuntimePaths(tmp_path)
     fake_client = FakeDaemonClient()
 
     monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
     monkeypatch.setattr(app, "DaemonClient", lambda _runtime: fake_client)
 
-    exit_code = app.run_send(argparse.Namespace(message="hello #mesh"))
+    exit_code = cli.main([*command, "hello #mesh"])
 
     captured = capsys.readouterr()
     assert exit_code == 0
@@ -1108,7 +1111,21 @@ def test_run_send_uses_daemon_command(tmp_path: Path, monkeypatch, capsys) -> No
             "content": "hello #mesh",
         }
     ]
-    assert "queued public message" in captured.out
+    assert captured.out == "public message accepted by local daemon (delivery unconfirmed)\n"
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize("command", [("send",), ("mesh", "send")])
+def test_send_reports_missing_daemon(tmp_path: Path, monkeypatch, capsys, command: tuple[str, ...]) -> None:
+    runtime = RuntimePaths(tmp_path)
+    monkeypatch.setattr(app, "RuntimePaths", lambda: runtime)
+
+    exit_code = cli.main([*command, "hello #mesh"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert "daemon socket not found" in captured.err
 
 
 def test_run_send_file_uses_daemon_command(tmp_path: Path, monkeypatch, capsys) -> None:
