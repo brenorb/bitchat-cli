@@ -2094,7 +2094,7 @@ def run_send(args: argparse.Namespace) -> int:
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    print("queued public message")
+    print("public message accepted by local daemon (delivery unconfirmed)")
     return 0
 
 
