@@ -1,0 +1,37 @@
+---
+title: "BitChat foreground and daemon radio ownership"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks OneSessionAcquiresLease
+    lg1: Path to the OneSessionAcquiresLease bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Sessions are about to start
+  s1: One session checked radio ownership
+  s2: One session can start the radio
+  s3: Both sessions checked radio ownership
+  s4: The session is closing
+  s5: Both sessions are allowed to start the radio
+  s6: No session is using the radio
+  [*] --> s0
+  s0 --> s1: a session checks for an existing owner
+  s1 --> s2: a session records its ownership
+  s1 --> s3: a session checks for an existing owner
+  s2 --> s4: a session begins shutting down
+  s3 --> s2: a session records its ownership
+  s4 --> s0: the session releases the radio
+  s2 --> s5: a session records its ownership
+  s4 --> s1: the session releases the radio
+  s4 --> s2: a session records its ownership
+  s5 --> s2: a session begins shutting down
+  s4 --> s6: the session releases the radio
+  s1 --> s6: the existing owner is still running
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s5 breaks
+  class s5 bugPath
