@@ -1,0 +1,33 @@
+---
+title: "Start, check, and stop the BitChat daemon"
+---
+stateDiagram-v2
+  s0: Daemon not running
+  s1: Radio already in use
+  s2: Waiting for command socket
+  s3: Startup failed
+  s4: Child exited before startup completed
+  s5: Socket open, services starting
+  s6: Services ready, waiting for the reply
+  s7: Daemon running
+  s8: Waiting for daemon exit
+  s9: Daemon stopped
+  s10: Daemon still shutting down
+  s11: Daemon exited after the timeout
+  [*] --> s0
+  s0 --> s1: start while another session owns the radio
+  s0 --> s2: start daemon
+  s2 --> s3: startup fails or times out
+  s2 --> s4: child exits
+  s2 --> s5: open command socket
+  s4 --> s3: startup fails or times out
+  s5 --> s3: startup fails or times out
+  s5 --> s4: child exits
+  s5 --> s6: finish starting services
+  s6 --> s3: startup fails or times out
+  s6 --> s7: return startup result
+  s7 --> s8: request stop
+  s8 --> s9: daemon exits
+  s8 --> s10: stop wait expires
+  s10 --> s11: daemon exits
+  s10 --> s9: daemon exits
