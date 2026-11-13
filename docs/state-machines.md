@@ -28,7 +28,7 @@ All main commands use [CLI input preflight](../.cursor/skills/verify-bitchat-cli
 | `transport.py`, `peripheral.py` | [BLE central lifecycle](../.cursor/skills/verify-bitchat-ble-transport/SKILL.md), [macOS peripheral](../.cursor/skills/verify-bitchat-ble-peripheral/SKILL.md), [Bluetooth chart](statecharts/ble-connection.md). |
 | `crypto.py`, `noise.py`, `protocol.py`, `verification.py` | Key and wire data conversion, [Noise session and pending sends](../.cursor/skills/verify-bitchat-noise-session/SKILL.md), proof verification. |
 | `files.py`, `fragments.py`, `sync.py`, `dedupe.py` | File persistence, [fragment assembly and expiry](../.cursor/skills/verify-bitchat-fragments/SKILL.md), and request windows and packet deduplication. |
-| `geochat.py`, `nostr.py`, `location_notes.py`, `network.py` | Watches, ingress processing, [relay directory cache](../.cursor/skills/verify-bitchat-relay-directory/SKILL.md), publication and proxy selection. |
+| `geochat.py`, `nostr.py`, `location_notes.py`, `network.py` | Watches, [ingress processing](../.cursor/skills/verify-bitchat-nostr-ingress/SKILL.md), [relay directory cache](../.cursor/skills/verify-bitchat-relay-directory/SKILL.md), publication and proxy selection. |
 | `state.py`, `social.py` | Identity, history, peer and overlay storage, plus runtime paths and radio leases. |
 | `__init__.py`, `constants.py` | Package initialization and constants. |
 | `tools/create_feature_tracker.py` | Populate a feature audit workbook and bind summary ranges. [Tracker skill](../.cursor/skills/verify-bitchat-feature-tracker/SKILL.md) |
