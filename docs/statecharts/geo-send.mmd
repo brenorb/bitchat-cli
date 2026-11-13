@@ -1,0 +1,18 @@
+---
+title: "Send a BitChat geohash message or add a watch"
+---
+stateDiagram-v2
+  s0: Checking the geohash and command options
+  s1: Command rejected before dispatch
+  s2: Dispatching to daemon
+  s3: Privacy warning shown, dispatching
+  s4: Daemon request failed
+  s5: Daemon accepted the request
+  [*] --> s0
+  s0 --> s1: require force or reject invalid options
+  s0 --> s2: accept the command
+  s0 --> s3: accept the command
+  s2 --> s4: report daemon failure
+  s2 --> s5: return daemon success
+  s3 --> s4: report daemon failure
+  s3 --> s5: return daemon success
