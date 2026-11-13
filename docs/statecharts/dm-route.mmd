@@ -1,0 +1,26 @@
+---
+title: "Route a BitChat direct message"
+---
+stateDiagram-v2
+  s0: Checking the recipient and available routes
+  s1: Message submission failed
+  s2: No available route
+  s3: Trying Nostr fallback
+  s4: Trying Bluetooth outbox
+  s5: Trying live Bluetooth link
+  s6: Message accepted via Nostr fallback
+  s7: Message accepted via Bluetooth outbox
+  s8: Message accepted via live Bluetooth link
+  [*] --> s0
+  s0 --> s1: reject missing recipient or content
+  s0 --> s2: no authorized route
+  s0 --> s3: select Nostr fallback
+  s0 --> s4: select Bluetooth outbox
+  s0 --> s5: select live Bluetooth link
+  s2 --> s1: report unavailable route
+  s3 --> s6: record outbound message and return its ID
+  s3 --> s1: report send or record error
+  s4 --> s7: record outbound message and return its ID
+  s4 --> s1: report send or record error
+  s5 --> s8: record outbound message and return its ID
+  s5 --> s1: report send or record error
