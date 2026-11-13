@@ -37,3 +37,5 @@ sh scripts/check-cli-state-machine.sh "$skill/ReceiptRecords.tla" "$skill/Receip
 ```
 
 The first receipt config fails `AllDistinctReceiptsPersist`. A delivered receipt is appended, then the read receipt with the same key is skipped. The fixture writes both rows using the daemon's receipt fields and verifies that only the first is present at both source refs. The distinct-key model passes in four states. Rerun the source and model checks when changing the receipt schema and update the reviewed refs and outcomes.
+
+Use pstack’s `/statechart` to inspect the shortest path for a failing rule or visualize the checked flow. When the source changes, update the reviewed revision after rechecking the model and source fixture.

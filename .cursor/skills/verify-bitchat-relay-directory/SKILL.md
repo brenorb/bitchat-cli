@@ -28,3 +28,5 @@ Reviewed main `06e5ff8b5690de72361d9f17d167b5242a59671d` and tag `v0.1.0` at `2b
 The model bounds one load and a single refresh attempt. It abstracts parsed directory contents to usable or empty and download to success or error. It omits stale-but-valid rows, concurrent writers, interrupted cache writes, and distance calculations.
 
 TLC checked 24 states. `RelayDirectory-mutant.cfg` returns an invalid result without refreshing. The fixture uses a temporary cache and stub CSV responses, and passes at both refs. In a disposable checkout, force the first parse result to be returned regardless of row count. The malformed-cache fixture catches it. Restore and rerun before updating the reviewed refs.
+
+Use pstack’s `/statechart` to inspect the shortest path for a failing rule or visualize the checked flow. When the source changes, update the reviewed revision after rechecking the model and source fixture.

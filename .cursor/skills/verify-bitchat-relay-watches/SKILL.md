@@ -29,3 +29,5 @@ Reviewed main `06e5ff8b5690de72361d9f17d167b5242a59671d` and tag `v0.1.0` at `2b
 The model bounds two subscription keys and one reconciliation at a time. The desired Nostr set represents the full target set after including the primary identity. It abstracts network and task scheduling and checks the installed set when reconciliation completes. It omits concurrent updates, receive timing, directory fetch, and presence cadence. The fixture uses actual task creation and cancellation with sleeping coroutine doubles.
 
 TLC checked `TasksMatchWatches` in 21 states. The mutant leaves obsolete tasks installed. In a disposable checkout, skip the loop over `existing - desired` in `GeoChatDaemon.set_watches`; the fixture detects the retained task. Restore and rerun the checks when the watch key set or cancellation behavior changes.
+
+Use pstack’s `/statechart` to inspect the shortest path for a failing rule or visualize the checked flow. When the source changes, update the reviewed revision after rechecking the model and source fixture.

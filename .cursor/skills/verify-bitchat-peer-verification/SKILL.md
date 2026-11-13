@@ -28,3 +28,5 @@ Reviewed main `06e5ff8b5690de72361d9f17d167b5242a59671d` and tag `v0.1.0` at `2b
 The model bounds one verification attempt. Key matching means all comparisons required by the available metadata pass. It abstracts proof parsing and signature verification, and omits concurrent updates and remote identity changes. Its proof rule applies only when the user supplies a payload.
 
 TLC checked `ProofMustMatchPeer` in 41 states. The source fixture uses a temporary peer record and ephemeral keys. Both refs reject a signed payload for a different peer, accept the matching payload, and clear the local flag on unverify. In a disposable checkout, bypass both BLE key comparisons in `run_social_verify`. The fixture detects the mismatched proof reaching the local verified state. The matching mutant config fails the model rule. Restore and rerun before updating reviewed refs.
+
+Use pstack’s `/statechart` to inspect the shortest path for a failing rule or visualize the checked flow. When the source changes, update the reviewed revision after rechecking the model and source fixture.

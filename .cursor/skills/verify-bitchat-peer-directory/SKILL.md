@@ -29,3 +29,5 @@ Reviewed main `06e5ff8b5690de72361d9f17d167b5242a59671d` and tag `v0.1.0` at `2b
 The model bounds one peer, three timestamps and Boolean social overlays. It abstracts each file operation to a successful sequential update. It omits concurrent writers, partial file writes, key material and fingerprint calculation. Local source tests cover retained addresses and independent flag updates.
 
 TLC checked 64 states. The stale-observation mutant accepts an older peer record. Bypassing the timestamp guard makes `test_peer_store_preserves_newer_addresses_when_older_observation_arrives` fail. The omitted-field mutant clears a favorite during another update. In a disposable checkout, replace the favorite fallback in `SocialStore.upsert` with false to reproduce the failure in the fixture. Restore, rerun, and update reviewed refs after changing either store.
+
+Use pstack’s `/statechart` to inspect the shortest path for a failing rule or visualize the checked flow. When the source changes, update the reviewed revision after rechecking the model and source fixture.

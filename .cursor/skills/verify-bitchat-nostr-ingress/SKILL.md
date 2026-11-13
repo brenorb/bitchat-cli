@@ -28,3 +28,5 @@ Reviewed main `06e5ff8b5690de72361d9f17d167b5242a59671d` and tag `v0.1.0` at `2b
 The model bounds one event ID and separates parse failure, invalid envelope and valid message or receipt. It abstracts cryptographic operations, malformed frame handling and connection recovery. Application route and block policy are separate from the callback boundary.
 
 TLC checked 16 states. In a disposable checkout, bypass the prior-event-ID guard in `_handle_relay_message`. The local fixture detects a second callback, matching the failed `Ingress-mutant.cfg` invariant. Both reviewed refs passed with a wrong recipient and a repeated local envelope. Restore and rerun before updating reviewed refs.
+
+Use pstack’s `/statechart` to inspect the shortest path for a failing rule or visualize the checked flow. When the source changes, update the reviewed revision after rechecking the model and source fixture.

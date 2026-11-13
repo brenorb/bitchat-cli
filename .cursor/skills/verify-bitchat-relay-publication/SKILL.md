@@ -28,3 +28,5 @@ Reviewed main `06e5ff8b5690de72361d9f17d167b5242a59671d` and tag `v0.1.0` at `2b
 The model bounds two relay attempts and abstracts their scheduling to outcome order. Nostr attempts relays serially and current geohash posts attempt them concurrently. The model covers text posts and encrypted DM and receipt publication. Presence uses an independent gather that reports errors when a relay fails. It shares the per-relay acknowledgement parser. The model abstracts event signing and timeout duration.
 
 TLC checked `SuccessRequiresAck` in 13 states. `PublishAck-legacy.cfg` shows send completion being reported as success without any acknowledgement. The source replay replaces only socket transport and uses a negative response for the actual event ID. Current code reports relay rejection for both sends. With `--legacy` the same fixture verifies that both tagged paths return success without reading the response. Rerun and update the source refs on changes.
+
+Use pstack’s `/statechart` to inspect the shortest path for a failing rule or visualize the checked flow. When the source changes, update the reviewed revision after rechecking the model and source fixture.

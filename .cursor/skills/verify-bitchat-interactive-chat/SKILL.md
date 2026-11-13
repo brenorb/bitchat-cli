@@ -33,3 +33,5 @@ sh scripts/check-cli-state-machine.sh "$skill/ChatSession.tla"
 ```
 
 The current config fails `EndedWithoutResources`. Acquiring the lease and then failing to load state leaves the lease file pointing at the process in both reviewed versions. A subsequent process can reclaim it after the original PID exits. The cleanup alternative moves release into the load failure path and passes in 11 states. Rerun the model and fixture when moving initialization or cleanup boundaries.
+
+Use pstack’s `/statechart` to inspect the shortest path for a failing rule or visualize the checked flow. When the source changes, update the reviewed revision after rechecking the model and source fixture.

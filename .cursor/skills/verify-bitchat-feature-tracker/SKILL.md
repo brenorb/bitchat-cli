@@ -29,3 +29,5 @@ Reviewed `tools/create_feature_tracker.py` at main `06e5ff8b5690de72361d9f17d167
 The model uses two rows to represent the existing 58 and a third for a future added row. It abstracts worksheet content and formulas to row coverage. It does not evaluate spreadsheet formula results or model file save failures.
 
 TLC checked the existing range in six states. Supply `Tracker-growth.cfg` to see `SummaryCoversRows` fail when the source list grows. The fixture runs the production builder with a temporary workbook and one extra list row in memory. The workbook validation extends to the new row, while the summary formula still stops at row 59. Rerun these checks if the feature list or summary formulas change and update the reviewed ref.
+
+Use pstack’s `/statechart` to inspect the shortest path for a failing rule or visualize the checked flow. When the source changes, update the reviewed revision after rechecking the model and source fixture.

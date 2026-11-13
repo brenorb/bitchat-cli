@@ -33,3 +33,5 @@ sh scripts/check-cli-state-machine.sh "$skill/NoteQuery.tla"
 ```
 
 The current config fails `ReceivedNoteRetained`. The fixture confirms that the end marker returns the note and an otherwise identical read that times out returns an empty list, at both reviewed refs. The partial-result config is a model alternative that retains received rows when a relay read ends early. Rerun both configs and the fixture when the query or error handling changes.
+
+Use pstack’s `/statechart` to inspect the shortest path for a failing rule or visualize the checked flow. When the source changes, update the reviewed revision after rechecking the model and source fixture.

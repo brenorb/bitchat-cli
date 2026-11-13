@@ -29,3 +29,5 @@ Reviewed `src/bitchat_cli/cli.py` at main `06e5ff8b5690de72361d9f17d167b5242a596
 The model bounds one input operation and distinguishes terminal from redirected I/O, validity and source count. It abstracts the input bytes and flags, and omits actions after dispatch. Source tests exercise invalid encoding, missing files, redacted errors and unchanged state after failure.
 
 TLC checked 96 states. `Input-mutant.cfg` skips password-file validity before dispatch. In a disposable checkout, bypass the nonempty single-line check in `_main`. Three of the invalid-file tests then fail. All 30 parser and password tests passed on the restored source. Rerun and update the reviewed refs after preflight changes.
+
+Use pstack’s `/statechart` to inspect the shortest path for a failing rule or visualize the checked flow. When the source changes, update the reviewed revision after rechecking the model and source fixture.

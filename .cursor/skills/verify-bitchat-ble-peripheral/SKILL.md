@@ -35,3 +35,5 @@ PYTHONPATH=src python -m pytest -q tests/test_peripheral.py
 The 15-state `Peripheral.cfg` checks queue bounds and clearing on stop. `Peripheral-ready.cfg` finds that a power cycle can trigger advertising while the service readiness flag is false. The local replay invokes the actual state handlers with a CoreBluetooth double and sees a second advertising request before another service-added callback. Hardware behavior depends on CoreBluetooth. The `Peripheral-guard.cfg` model alternative requires readiness and passes in 12 states. Ten source peripheral tests passed.
 
 `WriteBuffer-mutant.cfg` skips clearing a partial write on unsubscribe. In a disposable checkout, remove the corresponding `_pending_write_buffers.pop` from `_handle_unsubscribe`. The source test `test_handle_unsubscribe_clears_pending_write_buffer` fails. On changes, restore and rerun the source tests, rerun the checks including the readiness case, and update the reviewed refs.
+
+Use pstack’s `/statechart` to inspect the shortest path for a failing rule or visualize the checked flow. When the source changes, update the reviewed revision after rechecking the model and source fixture.

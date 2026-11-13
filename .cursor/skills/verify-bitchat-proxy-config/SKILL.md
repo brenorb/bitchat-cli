@@ -32,3 +32,5 @@ sh scripts/check-cli-state-machine.sh "$skill/ProxyConfig.tla"
 ```
 
 The current config fails `DisabledRequiredRejected` because the websocket path returns a direct setting in disabled/required mode. The local fixture reproduces the argument difference at both refs without opening any sockets. It also checks that proxy status drops username and password. The consistent policy alternative passes in 24 states. Rerun both configs and the source fixture when changing network settings.
+
+Use pstack’s `/statechart` to inspect the shortest path for a failing rule or visualize the checked flow. When the source changes, update the reviewed revision after rechecking the model and source fixture.
