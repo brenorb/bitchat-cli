@@ -1,0 +1,40 @@
+---
+title: "Discover and connect to a BitChat Bluetooth peer"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks StopDisconnectsLink
+    lg1: Path to the StopDisconnectsLink bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Scanning for a peer
+  s1: Peer discovered
+  s2: Transport stopped
+  s3: Connecting to peer
+  s4: Waiting before reconnecting
+  s5: Connected, enabling notifications
+  s6: Peer ready
+  s7: Transport stopped with link still open
+  [*] --> s0
+  s0 --> s1: find peer advertisement
+  s0 --> s2: stop transport
+  s1 --> s2: stop transport
+  s1 --> s3: start connecting
+  s3 --> s2: stop transport
+  s3 --> s4: connection setup fails
+  s3 --> s5: open Bluetooth link
+  s4 --> s0: retry delay ends
+  s4 --> s2: stop transport
+  s5 --> s4: connection setup fails
+  s5 --> s6: enable notifications
+  s5 --> s7: stop transport
+  s6 --> s2: stop transport
+  s6 --> s4: peer disconnects
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s3 bugPath
+  class s5 bugPath
+  class s7 breaks
+  class s7 bugPath
