@@ -35,3 +35,5 @@ All main commands use [CLI input preflight](../.cursor/skills/verify-bitchat-cli
 | `pyproject.toml`, `.github/workflows/release.yml` | Aliased Python console scripts and a version-tag distribution build followed by PyPI publishing. |
 
 The models and replays bound local state and use isolated files, local relays or doubles for BLE and network components. Consult each skill for version differences and expected counterexamples.
+
+The tagged PyPI build produces both console aliases in the wheel. [Package skill](../.cursor/skills/verify-bitchat-package/SKILL.md)
