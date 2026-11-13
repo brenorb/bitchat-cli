@@ -1,0 +1,36 @@
+---
+title: "Receive and save a BitChat file"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks DuplicateImpliesSaved
+    lg1: Path to the DuplicateImpliesSaved bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Receiving a file
+  s1: File rejected
+  s2: Saving a local copy
+  s3: File could not be saved
+  s4: Local copy saved
+  s5: File available in history
+  s6: Receiving a retry
+  s7: Sending a private delivery receipt
+  s8: Retry suppressed, file still missing
+  [*] --> s0
+  s0 --> s1: reject invalid file
+  s0 --> s2: accept verified file
+  s2 --> s3: encounter filesystem error
+  s2 --> s4: write file
+  s3 --> s6: see the transfer again
+  s4 --> s5: record the saved file
+  s4 --> s7: record the saved file
+  s6 --> s8: suppress already seen transfer
+  s7 --> s5: finish the receipt attempt
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s6 bugPath
+  class s8 breaks
+  class s8 bugPath
