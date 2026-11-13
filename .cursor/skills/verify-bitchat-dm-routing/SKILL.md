@@ -32,3 +32,14 @@ Reviewed main `06e5ff8b5690de72361d9f17d167b5242a59671d` and tag `v0.1.0` at `2b
 The route model bounds one invocation and fixed link and contact state until a route is chosen. It abstracts publication and local recording to an accepted or error outcome. An accepted message ID describes local submission. Peer delivery uses a separate receipt. The receipt model covers sequential views of one inbound message with its outbound receipt still in the inspected history. JSON exits before the mark-read call. The model omits concurrent invocations, tail windows that omit a previous receipt, and changes to route selection while sending.
 
 TLC checked the routing rules in 137 states and the receipt rules in 14. The mutant configs bypass fallback eligibility or the already-sent filter. In a disposable checkout, bypass the favorite and blocked check in `_eligible_nostr_fallback_record` or remove the `message_id in sent` branch from `pending_read_receipt_ids`. The replay fails on each mutation. The baseline replay and eight direct-message CLI tests passed. Rerun the checks and update the reviewed refs if changing either path. [Routing statechart](../../../docs/statecharts/dm-route.md)
+
+## History tail and overlapping reads
+
+```sh
+sh scripts/check-cli-state-machine.sh "$skill/HistoryReceipts.tla" "$skill/HistoryReceipts-tail.cfg"
+sh scripts/check-cli-state-machine.sh "$skill/HistoryReceipts.tla" "$skill/HistoryReceipts-concurrent.cfg"
+sh scripts/check-cli-state-machine.sh "$skill/HistoryReceipts.tla" "$skill/HistoryReceipts-recheck.cfg"
+PYTHONPATH=src python "$skill/references/check-history-receipts.py"
+```
+
+The tail config starts with a prior receipt and a visible inbound message. In `run_dm_history`, limiting rows happens before `pending_read_receipt_ids`, so a receipt outside that limit cannot suppress a new request. The overlapping-read config starts with two clients reading the same message before either submission records a result. The daemon's `dm_mark_read` loop attempts each supplied ID before appending a local receipt, without an existing-receipt lookup. Both configs fail `NoRepeatedReadReceipt`. The local fixture checks both client requests with a stub daemon at the reviewed refs. This establishes repeated submission, with wire delivery still dependent on the route. The 13-state recheck alternative covers an atomic duplicate check at dispatch.
